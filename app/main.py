@@ -16,7 +16,13 @@ parser = argparse.ArgumentParser(
 parser.add_argument("--dir")
 parser.add_argument("--dbfilename")
 parser.add_argument("--port", type=int, default=6379)
+parser.add_argument("--replicaof")
 args = parser.parse_args()
+
+if args.replicaof:
+    IS_MASTER = False
+else:
+    IS_MASTER = True
 
 
 def rdb_file_process_expiry(f: BinaryIO, bytes_to_read: int) -> tuple[float, BinaryIO]:
@@ -176,14 +182,19 @@ def read_rdb_file_from_disk():
         return
 
 
-def handle_info_command(writer: asyncio.StreamWriter) -> None:
+async def handle_info_command(writer: asyncio.StreamWriter) -> None:
     info_args = decode_simple_string()
     if info_args != "replication":
         raise ValueError("Invalid argument to `INFO` command! " f"(Given: {info_args})")
-    writer.write("$11\r\nrole:master\r\n".encode())
+    if IS_MASTER:
+        writer.write("$11\r\nrole:master\r\n".encode())
+        await writer.drain()
+    else:
+        writer.write("$10\r\nrole:slave\r\n".encode())
+        await writer.drain()
 
 
-def handle_keys_command(writer: asyncio.StreamWriter) -> None:
+async def handle_keys_command(writer: asyncio.StreamWriter) -> None:
     c = decode_simple_string()
     if c != "*":
         raise ValueError(
@@ -193,9 +204,10 @@ def handle_keys_command(writer: asyncio.StreamWriter) -> None:
     for k in key_store:
         s += f"${len(k)}\r\n{k}\r\n"
     writer.write(s.encode())
+    await writer.drain()
 
 
-def handle_config_command(writer: asyncio.StreamWriter) -> None:
+async def handle_config_command(writer: asyncio.StreamWriter) -> None:
     get_command = decode_simple_string()
     if get_command != "GET":
         raise ValueError(
@@ -205,30 +217,36 @@ def handle_config_command(writer: asyncio.StreamWriter) -> None:
         case "dir":
             response = f"*2\r\n$3\r\ndir\r\n${len(args.dir)}\r\n{args.dir}\r\n"
             writer.write(response.encode())
+            await writer.drain()
         case "dbfilename":
             response = (
                 f"*2\r\n$10\r\ndbfilename\r\n"
                 f"${len(args.dbfilename)}\r\n{args.dbfilename}\r\n"
             )
             writer.write(response.encode())
+            await writer.drain()
 
 
-def handle_get_command(writer: asyncio.StreamWriter) -> None:
+async def handle_get_command(writer: asyncio.StreamWriter) -> None:
     key = decode_simple_string()
     if key not in key_store:
         writer.write("$-1\r\n".encode())
+        await writer.drain()
         return
     val, expiry = key_store[key]
     if expiry is None:
         writer.write(f"${len(val)}\r\n{val}\r\n".encode())
+        await writer.drain()
         return
     if time.time() > expiry:
         writer.write("$-1\r\n".encode())
+        await writer.drain()
         return
     writer.write(f"${len(val)}\r\n{val}\r\n".encode())
+    await writer.drain()
 
 
-def handle_set_command(writer: asyncio.StreamWriter) -> None:
+async def handle_set_command(writer: asyncio.StreamWriter) -> None:
     key = decode_simple_string()
     val = decode_simple_string()
     print(f"Decoded key-val: {key} --> {val}")
@@ -242,11 +260,13 @@ def handle_set_command(writer: asyncio.StreamWriter) -> None:
     key_store[key] = (val, expiry_time)
     print(f"Set {key} to {(val, expiry_time)}")
     writer.write("+OK\r\n".encode())
+    await writer.drain()
 
 
-def handle_echo_command(writer: asyncio.StreamWriter) -> None:
+async def handle_echo_command(writer: asyncio.StreamWriter) -> None:
     c = decode_simple_string()
     writer.write(f"${len(c)}\r\n{c}\r\n".encode())
+    await writer.drain()
 
 
 def decode_simple_string() -> str:
@@ -255,7 +275,7 @@ def decode_simple_string() -> str:
     return command_queue.popleft()
 
 
-def decode_array(writer: asyncio.StreamWriter) -> None:
+async def decode_array(writer: asyncio.StreamWriter) -> None:
     # Turn "*<number>" into integer, then check whether we have that number of elements
     # in command queue. If not, throw it back to connection handler to continue
     # reading in bytes over connection into queue
@@ -268,18 +288,19 @@ def decode_array(writer: asyncio.StreamWriter) -> None:
         match s:
             case "PING":
                 writer.write("+PONG\r\n".encode())
+                await writer.drain()
             case "ECHO":
-                handle_echo_command(writer)
+                await handle_echo_command(writer)
             case "SET":
-                handle_set_command(writer)
+                await handle_set_command(writer)
             case "GET":
-                handle_get_command(writer)
+                await handle_get_command(writer)
             case "CONFIG":
-                handle_config_command(writer)
+                await handle_config_command(writer)
             case "KEYS":
-                handle_keys_command(writer)
+                await handle_keys_command(writer)
             case "INFO":
-                handle_info_command(writer)
+                await handle_info_command(writer)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
 
@@ -299,7 +320,7 @@ async def connection_handler(
         # Checking first character of first item in command queue
         match command_queue[0][0]:
             case "*":
-                decode_array(writer)
+                await decode_array(writer)
             case _:
                 raise ValueError("Huh?")
 
