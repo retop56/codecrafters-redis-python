@@ -176,6 +176,13 @@ def read_rdb_file_from_disk():
         return
 
 
+def handle_info_command(writer: asyncio.StreamWriter) -> None:
+    info_args = decode_simple_string()
+    if info_args != "replication":
+        raise ValueError("Invalid argument to `INFO` command! " f"(Given: {info_args})")
+    writer.write("$11\r\nrole:master\r\n".encode())
+
+
 def handle_keys_command(writer: asyncio.StreamWriter) -> None:
     c = decode_simple_string()
     if c != "*":
@@ -271,6 +278,8 @@ def decode_array(writer: asyncio.StreamWriter) -> None:
                 handle_config_command(writer)
             case "KEYS":
                 handle_keys_command(writer)
+            case "INFO":
+                handle_info_command(writer)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
 
