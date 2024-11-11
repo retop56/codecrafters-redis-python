@@ -4,6 +4,11 @@ from collections import deque
 command_queue = deque()
 
 
+def handle_echo_command(writer: asyncio.StreamWriter):
+    c = decode_simple_string()
+    writer.write(f"${len(c)}\r\n{c}\r\n".encode())
+
+
 def decode_simple_string():
     # Remove $<length-of-string>
     command_queue.popleft()
@@ -23,6 +28,8 @@ def decode_array(writer: asyncio.StreamWriter):
         match s:
             case "PING":
                 writer.write("+PONG\r\n".encode())
+            case "ECHO":
+                handle_echo_command(writer)
 
 
 async def connection_handler(
