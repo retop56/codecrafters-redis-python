@@ -2,10 +2,38 @@ import asyncio
 from collections import deque
 import time
 from typing import Optional
+import argparse
 
 command_queue = deque()
 key_store: dict[str, tuple[str, Optional[float]]] = {}
 """key --> (value, Optional[expiry])"""
+
+
+parser = argparse.ArgumentParser(
+    prog="Bootleg Redis",
+    description="'Build your own Redis' Codecrafters challenge",
+)
+parser.add_argument("--dir")
+parser.add_argument("--dbfilename")
+args = parser.parse_args()
+
+
+def handle_config_command(writer: asyncio.StreamWriter) -> None:
+    get_command = decode_simple_string()
+    if get_command != "GET":
+        raise ValueError(
+            f"'CONFIG' needs to be followed by 'GET'.\n" f"Instead, got {get_command}"
+        )
+    match decode_simple_string():
+        case "dir":
+            response = f"*2\r\n$3\r\ndir\r\n${len(args.dir)}\r\n{args.dir}\r\n"
+            writer.write(response.encode())
+        case "dbfilename":
+            response = (
+                f"*2\r\n$10\r\ndbfilename\r\n"
+                f"${len(args.dbfilename)}\r\n{args.dbfilename}\r\n"
+            )
+            writer.write(response.encode())
 
 
 def handle_get_command(writer: asyncio.StreamWriter) -> None:
@@ -69,6 +97,8 @@ def decode_array(writer: asyncio.StreamWriter) -> None:
                 handle_set_command(writer)
             case "GET":
                 handle_get_command(writer)
+            case "CONFIG":
+                handle_config_command(writer)
 
 
 async def connection_handler(
