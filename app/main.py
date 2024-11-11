@@ -21,12 +21,10 @@ args = parser.parse_args()
 def rdb_file_process_expiry(f: BinaryIO, bytes_to_read: int) -> tuple[float, BinaryIO]:
     if bytes_to_read == 4:
         expire_seconds = int.from_bytes(f.read(bytes_to_read), byteorder="little")
-        expiry = time.time() + expire_seconds
-        return (expiry, f)
+        return (expire_seconds, f)
     elif bytes_to_read == 8:
         expire_ms = int.from_bytes(f.read(bytes_to_read), byteorder="little") / 1000
-        expiry = time.time() + expire_ms
-        return (expiry, f)
+        return (expire_ms, f)
     else:
         raise ValueError("Unable to process expiry time for key_value read from file!")
 
