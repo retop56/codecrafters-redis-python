@@ -18,6 +18,12 @@ parser.add_argument("--dbfilename")
 args = parser.parse_args()
 
 
+def read_rdb_file_from_disk():
+    with open(f"{args.dir}/{args.dbfilename}", "rb") as f:
+        if f.read(9).decode() != "REDIS0011":
+            raise ValueError("Malformed header")
+
+
 def handle_config_command(writer: asyncio.StreamWriter) -> None:
     get_command = decode_simple_string()
     if get_command != "GET":
@@ -128,4 +134,5 @@ async def main():
 
 
 if __name__ == "__main__":
+    read_rdb_file_from_disk()
     asyncio.run(main())
