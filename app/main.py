@@ -2,20 +2,37 @@ import asyncio
 from collections import deque
 
 command_queue = deque()
+key_store: dict[str, str] = {}
 
 
-def handle_echo_command(writer: asyncio.StreamWriter):
+def handle_get_command(writer: asyncio.StreamWriter) -> None:
+    key = decode_simple_string()
+    val = key_store.get(key, None)
+    if val:
+        writer.write(f"${len(val)}\r\n{val}\r\n".encode())
+    else:
+        writer.write("$-1\r\n".encode())
+
+
+def handle_set_command(writer: asyncio.StreamWriter) -> None:
+    key = decode_simple_string()
+    val = decode_simple_string()
+    key_store[key] = val
+    writer.write("+OK\r\n".encode())
+
+
+def handle_echo_command(writer: asyncio.StreamWriter) -> None:
     c = decode_simple_string()
     writer.write(f"${len(c)}\r\n{c}\r\n".encode())
 
 
-def decode_simple_string():
+def decode_simple_string() -> str:
     # Remove $<length-of-string>
     command_queue.popleft()
     return command_queue.popleft()
 
 
-def decode_array(writer: asyncio.StreamWriter):
+def decode_array(writer: asyncio.StreamWriter) -> None:
     # Turn "*<number>" into integer, then check whether we have that number of elements
     # in command queue. If not, throw it back to connection handler to continue
     # reading in bytes over connection into queue
@@ -30,6 +47,10 @@ def decode_array(writer: asyncio.StreamWriter):
                 writer.write("+PONG\r\n".encode())
             case "ECHO":
                 handle_echo_command(writer)
+            case "SET":
+                handle_set_command(writer)
+            case "GET":
+                handle_get_command(writer)
 
 
 async def connection_handler(
