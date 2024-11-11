@@ -28,18 +28,21 @@ def decode_array(writer: asyncio.StreamWriter):
 async def connection_handler(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ):
-    data = await reader.read(100)
-    # Remove any empty strings from message after splitting
-    data = [chunk for chunk in data.decode().split("\r\n") if chunk]
-    for d in data:
-        command_queue.append(d)
+    while True:
+        data = await reader.read(100)
+        print(f"Received {data}")
+        # Remove any empty strings from message after splitting
+        data = [chunk for chunk in data.decode().split("\r\n") if chunk]
+        for d in data:
+            command_queue.append(d)
+        print(f"Updated command queue: {command_queue}")
 
-    # Checking first character of first item in command queue
-    match command_queue[0][0]:
-        case "*":
-            decode_array(writer)
-        case _:
-            raise ValueError("Huh?")
+        # Checking first character of first item in command queue
+        match command_queue[0][0]:
+            case "*":
+                decode_array(writer)
+            case _:
+                raise ValueError("Huh?")
 
 
 async def main():
