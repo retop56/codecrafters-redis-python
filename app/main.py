@@ -1,7 +1,7 @@
 import asyncio
 from collections import deque
 import time
-from typing import Optional
+from typing import Optional, BinaryIO
 import argparse
 
 command_queue = deque()
@@ -18,10 +18,96 @@ parser.add_argument("--dbfilename")
 args = parser.parse_args()
 
 
+def rdb_file_process_size_encoded_value(f: BinaryIO) -> tuple[int, BinaryIO]:
+    first_byte = f.read(1)
+    print(f"First byte: {first_byte}")
+    first_two_bit_mask = 0b11000000
+    bottom_six_bit_mask = 0b00111111
+    bottom_fourteen_bit_mask = 0x3FFF
+    first_two_bits = int.from_bytes(first_byte) & first_two_bit_mask
+    print(f"First two bits: {first_two_bits}")
+    match first_two_bits:
+        # If the first two bits are 0b00:
+        # The size is the remaining 6 bits of the byte.
+        case 0b00000000:
+            print("First two bits are 0b00")
+            size_value = int.from_bytes(first_byte) & bottom_six_bit_mask
+            return (size_value, f)
+        # If the first two bits are 0b01:
+        # The size is the next 14 bits
+        # (remaining 6 bits in the first byte, combined with the next byte),
+        # in big-endian (read left-to-right).
+        case 0b01000000:
+            print("First two bits are 0b01")
+            size_value = first_byte + f.read(1)
+            size_value = int.from_bytes(size_value) & bottom_fourteen_bit_mask
+            return (size_value, f)
+        # If the first two bits are 0b10:
+        # Ignore the remaining 6 bits of the first byte.
+        # The size is the next 4 bytes, in big-endian (read left-to-right).
+        case 0b10000000:
+            print("First two bits are 0b10")
+            size_value = int.from_bytes(f.read(4))
+            return (size_value, f)
+        case _:
+            raise ValueError(
+                f"Unable to read size-encoded value. (First two bits: {first_two_bits})"
+            )
+
+
+def rdb_file_process_string_encoded_value(f: BinaryIO) -> tuple[str, BinaryIO]:
+    first_byte = f.read(1)
+    if (int.from_bytes(first_byte) & 0b11000000) == 0b11000000:
+        match first_byte:
+            case b"\xC0":
+                s = str(int.from_bytes(f.read(1)))
+                print(f'Found integer string: "{s}"')
+                return (s, f)
+            case b"\xC1":
+                s = str(int.from_bytes(f.read(2), byteorder="little"))
+                print(f'Found integer string: "{s}"')
+                return (s, f)
+            case b"\xC2":
+                s = str(int.from_bytes(f.read(4), byteorder="little"))
+                print(f'Found integer string: "{s}"')
+                return (s, f)
+            case _:
+                raise ValueError(
+                    "Unable to process string-encoded value"
+                    f"(First byte: {first_byte}"
+                )
+    else:
+        f.seek(-1, 1)
+        length_of_string, f = rdb_file_process_size_encoded_value(f)
+        print(f"Length of string: {length_of_string}")
+        s = ""
+        for _ in range(length_of_string):
+            s += f.read(1).decode()
+        return (s, f)
+
+
+def rdb_file_process_metadata_section(f: BinaryIO) -> BinaryIO:
+    key, f = rdb_file_process_string_encoded_value(f)
+    print(f"Found metadata key: {key}")
+    val, f = rdb_file_process_string_encoded_value(f)
+    print(f"Found metadata value: {val}")
+    print(f"Metadata key-value pair: {key} --> {val}")
+    return f
+
+
 def read_rdb_file_from_disk():
     with open(f"{args.dir}/{args.dbfilename}", "rb") as f:
         if f.read(9).decode() != "REDIS0011":
             raise ValueError("Malformed header")
+        while True:
+            curr_chunk = f.read(1)
+            match curr_chunk:
+                case b"\xFA":
+                    print("Found metadata section")
+                    f = rdb_file_process_metadata_section(f)
+                case b"\xFE":
+                    print("Found database section")
+                    exit()
 
 
 def handle_config_command(writer: asyncio.StreamWriter) -> None:
