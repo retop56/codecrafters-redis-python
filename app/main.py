@@ -6,7 +6,7 @@ import argparse
 
 command_queue = deque()
 key_store: dict[str, tuple[str, Optional[float]]] = {}
-"""key --> (value, Optional[expiry])"""
+"""key --> (value, expiry)"""
 
 
 parser = argparse.ArgumentParser(
@@ -16,6 +16,71 @@ parser = argparse.ArgumentParser(
 parser.add_argument("--dir")
 parser.add_argument("--dbfilename")
 args = parser.parse_args()
+
+
+def rdb_file_process_expiry(f: BinaryIO, bytes_to_read: int) -> tuple[float, BinaryIO]:
+    if bytes_to_read == 4:
+        expire_seconds = int.from_bytes(f.read(bytes_to_read), byteorder="little")
+        expiry = time.time() + expire_seconds
+        return (expiry, f)
+    elif bytes_to_read == 8:
+        expire_ms = int.from_bytes(f.read(bytes_to_read), byteorder="little") / 1000
+        expiry = time.time() + expire_ms
+        return (expiry, f)
+    else:
+        raise ValueError("Unable to process expiry time for key_value read from file!")
+
+
+def rdb_file_process_ht_entry(f: BinaryIO) -> BinaryIO:
+    first_byte = f.read(1)
+    match first_byte:
+        # The 1-byte flag that specifies the value’s type and encoding.
+        # Here, the flag is 0, which means "string.
+        case b"\x00":
+            key, f = rdb_file_process_string_encoded_value(f)
+            val, f = rdb_file_process_string_encoded_value(f)
+            key_store[key] = (val, None)
+        # Indicates that this key has an expire, and that the expire
+        # timestamp is expressed in milliseconds
+        case b"\xFC":
+            # The expire timestamp, expressed in Unix time,
+            # stored as an 8-byte unsigned long, in little-endian (read right-to-left)
+            expiry, f = rdb_file_process_expiry(f, 8)
+            if f.read(1) != b"\x00":
+                f.seek(-1, 1)
+                raise ValueError(f"Invalid key_value type! (Found: {f.read(1)})")
+            key, f = rdb_file_process_string_encoded_value(f)
+            val, f = rdb_file_process_string_encoded_value(f)
+            key_store[key] = (val, expiry)
+        # Indicates that this key ("baz") has an expire,
+        # and that the expire timestamp is expressed in seconds. */
+        case b"\xFD":
+            expiry, f = rdb_file_process_expiry(f, 4)
+            if f.read(1) != b"\x00":
+                f.seek(-1, 1)
+                raise ValueError(f"Invalid key_value type! (Found: {f.read(1)})")
+            key, f = rdb_file_process_string_encoded_value(f)
+            val, f = rdb_file_process_string_encoded_value(f)
+            key_store[key] = (val, expiry)
+        case _:
+            raise ValueError("Unable to process hash-table entry from RDB file!")
+
+    return f
+
+
+def rdb_file_process_database_section(f: BinaryIO) -> BinaryIO:
+    # Get index of database (no current known use)
+    _, f = rdb_file_process_size_encoded_value(f)
+    if f.read(1) != b"\xFB":
+        f.seek(-1, 1)
+        raise ValueError(f'Expected b"\xFB", instead got {f.read(1)}')
+    ht_total_keys, f = rdb_file_process_size_encoded_value(f)
+    ht_expiry_keys, f = rdb_file_process_size_encoded_value(f)
+    print(f"Total keys: {ht_total_keys}")
+    print(f"Keys with expiry: {ht_expiry_keys}")
+    for _ in range(ht_total_keys):
+        f = rdb_file_process_ht_entry(f)
+    return f
 
 
 def rdb_file_process_size_encoded_value(f: BinaryIO) -> tuple[int, BinaryIO]:
@@ -88,9 +153,7 @@ def rdb_file_process_string_encoded_value(f: BinaryIO) -> tuple[str, BinaryIO]:
 
 def rdb_file_process_metadata_section(f: BinaryIO) -> BinaryIO:
     key, f = rdb_file_process_string_encoded_value(f)
-    print(f"Found metadata key: {key}")
     val, f = rdb_file_process_string_encoded_value(f)
-    print(f"Found metadata value: {val}")
     print(f"Metadata key-value pair: {key} --> {val}")
     return f
 
@@ -103,11 +166,12 @@ def read_rdb_file_from_disk():
             curr_chunk = f.read(1)
             match curr_chunk:
                 case b"\xFA":
-                    print("Found metadata section")
                     f = rdb_file_process_metadata_section(f)
                 case b"\xFE":
-                    print("Found database section")
-                    exit()
+                    f = rdb_file_process_database_section(f)
+                case _:
+                    break
+        print(f"Keystore after reading from file: {key_store}")
 
 
 def handle_config_command(writer: asyncio.StreamWriter) -> None:
