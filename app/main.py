@@ -1,19 +1,48 @@
-# import socket  # noqa: F401
 import asyncio
+from collections import deque
+
+command_queue = deque()
 
 
-def connection_handler(reader, writer):
-    return
+def decode_simple_string():
+    # Remove $<length-of-string>
+    command_queue.popleft()
+    return command_queue.popleft()
+
+
+def decode_array(writer: asyncio.StreamWriter):
+    # Turn "*<number>" into integer, then check whether we have that number of elements
+    # in command queue. If not, throw it back to connection handler to continue
+    # reading in bytes over connection into queue
+    expected_array_length = int(command_queue.popleft()[1:])
+    if (expected_array_length * 2) < len(command_queue):
+        return
+
+    if command_queue[0].startswith("$"):
+        s = decode_simple_string()
+        match s:
+            case "PING":
+                writer.write("+PONG\r\n".encode())
+
+
+async def connection_handler(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+):
+    data = await reader.read(100)
+    # Remove any empty strings from message after splitting
+    data = [chunk for chunk in data.decode().split("\r\n") if chunk]
+    for d in data:
+        command_queue.append(d)
+
+    # Checking first character of first item in command queue
+    match command_queue[0][0]:
+        case "*":
+            decode_array(writer)
+        case _:
+            raise ValueError("Huh?")
 
 
 async def main():
-    # You can use print statements as follows for debugging, they'll be visible when running tests.
-    print("Logs from your program will appear here!")
-
-    # Uncomment this to pass the first stage
-    #
-    # server_socket = socket.create_server(("localhost", 6379), reuse_port=True)
-    # server_socket.accept()  # wait for client
     server_socket = await asyncio.start_server(connection_handler, "localhost", 6379)
     async with server_socket:
         await server_socket.serve_forever()
