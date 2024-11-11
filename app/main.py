@@ -15,6 +15,7 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("--dir")
 parser.add_argument("--dbfilename")
+parser.add_argument("--port", type=int, default=6379)
 args = parser.parse_args()
 
 
@@ -295,7 +296,9 @@ async def connection_handler(
 
 
 async def main():
-    server_socket = await asyncio.start_server(connection_handler, "localhost", 6379)
+    server_socket = await asyncio.start_server(
+        connection_handler, "localhost", args.port
+    )
     async with server_socket:
         await server_socket.serve_forever()
 
