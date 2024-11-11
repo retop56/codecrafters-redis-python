@@ -159,19 +159,34 @@ def rdb_file_process_metadata_section(f: BinaryIO) -> BinaryIO:
 
 
 def read_rdb_file_from_disk():
-    with open(f"{args.dir}/{args.dbfilename}", "rb") as f:
-        if f.read(9).decode() != "REDIS0011":
-            raise ValueError("Malformed header")
-        while True:
-            curr_chunk = f.read(1)
-            match curr_chunk:
-                case b"\xFA":
-                    f = rdb_file_process_metadata_section(f)
-                case b"\xFE":
-                    f = rdb_file_process_database_section(f)
-                case _:
-                    break
-        print(f"Keystore after reading from file: {key_store}")
+    try:
+        with open(f"{args.dir}/{args.dbfilename}", "rb") as f:
+            if f.read(9).decode() != "REDIS0011":
+                raise ValueError("Malformed header")
+            while True:
+                curr_chunk = f.read(1)
+                match curr_chunk:
+                    case b"\xFA":
+                        f = rdb_file_process_metadata_section(f)
+                    case b"\xFE":
+                        f = rdb_file_process_database_section(f)
+                    case _:
+                        break
+            print(f"Keystore after reading from file: {key_store}")
+    except FileNotFoundError:
+        return
+
+
+def handle_keys_command(writer: asyncio.StreamWriter) -> None:
+    c = decode_simple_string()
+    if c != "*":
+        raise ValueError(
+            f"Can only handle '*' argument to keys command! " f"(Given: {c})"
+        )
+    s = f"*{len(key_store)}\r\n"
+    for k in key_store:
+        s += f"${len(k)}\r\n{k}\r\n"
+    writer.write(s.encode())
 
 
 def handle_config_command(writer: asyncio.StreamWriter) -> None:
@@ -255,6 +270,10 @@ def decode_array(writer: asyncio.StreamWriter) -> None:
                 handle_get_command(writer)
             case "CONFIG":
                 handle_config_command(writer)
+            case "KEYS":
+                handle_keys_command(writer)
+            case _:
+                raise ValueError(f"Unrecognized command: {s}")
 
 
 async def connection_handler(
