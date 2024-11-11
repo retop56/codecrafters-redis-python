@@ -1,23 +1,41 @@
 import asyncio
 from collections import deque
+import time
+from typing import Optional
 
 command_queue = deque()
-key_store: dict[str, str] = {}
+key_store: dict[str, tuple[str, Optional[float]]] = {}
+"""key --> (value, Optional[expiry])"""
 
 
 def handle_get_command(writer: asyncio.StreamWriter) -> None:
     key = decode_simple_string()
-    val = key_store.get(key, None)
-    if val:
-        writer.write(f"${len(val)}\r\n{val}\r\n".encode())
-    else:
+    if key not in key_store:
         writer.write("$-1\r\n".encode())
+        return
+    val, expiry = key_store[key]
+    if expiry is None:
+        writer.write(f"${len(val)}\r\n{val}\r\n".encode())
+        return
+    if time.time() > expiry:
+        writer.write("$-1\r\n".encode())
+        return
+    writer.write(f"${len(val)}\r\n{val}\r\n".encode())
 
 
 def handle_set_command(writer: asyncio.StreamWriter) -> None:
     key = decode_simple_string()
     val = decode_simple_string()
-    key_store[key] = val
+    print(f"Decoded key-val: {key} --> {val}")
+    print(f"Command queue after decoding key-val: {command_queue}")
+    if len(command_queue) > 1 and command_queue[1].lower() == "px":
+        decode_simple_string()
+        expiry_length_seconds = float(decode_simple_string()) / 1000
+        expiry_time = time.time() + expiry_length_seconds
+    else:
+        expiry_time = None
+    key_store[key] = (val, expiry_time)
+    print(f"Set {key} to {(val, expiry_time)}")
     writer.write("+OK\r\n".encode())
 
 
