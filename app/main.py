@@ -313,6 +313,9 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
                 await handle_keys_command(writer)
             case "INFO":
                 await handle_info_command(writer)
+            case "REPLCONF":
+                writer.write("+OK\r\n".encode())
+                await writer.drain()
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
 
@@ -342,6 +345,28 @@ async def replica_start():
         HOST, PORT = args.replicaof.split()
         s.connect((HOST, int(PORT)))
         s.sendall("*1\r\n$4\r\nPING\r\n".encode())
+        data = s.recv(1024)
+        if data.decode() != "+PONG\r\n":
+            raise ValueError(
+                "Expected '+PONG\\r\\n' in response to 'PING'. "
+                f"Instead, got {data.decode()}"
+            )
+        s.sendall(
+            f"*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n{args.port}\r\n".encode()
+        )
+        data = s.recv(1024)
+        if data.decode() != "+OK\r\n":
+            raise ValueError(
+                "Expected '+OK\\r\\n' in response to first 'REPLCONF'. "
+                f"Instead, got {data.decode()}"
+            )
+        s.sendall("*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n".encode())
+        data = s.recv(1024)
+        if data.decode() != "+OK\r\n":
+            raise ValueError(
+                "Expected '+OK\\r\\n' in response to second 'REPLCONF'. "
+                f"Instead, got {data.decode()}"
+            )
     server_socket = await asyncio.start_server(
         connection_handler, "localhost", args.port
     )
