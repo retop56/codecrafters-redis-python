@@ -3,6 +3,8 @@ from collections import deque
 import time
 from typing import Optional, BinaryIO
 import argparse
+import random
+import string
 
 command_queue = deque()
 key_store: dict[str, tuple[str, Optional[float]]] = {}
@@ -23,6 +25,10 @@ if args.replicaof:
     IS_MASTER = False
 else:
     IS_MASTER = True
+    master_replid = "".join(
+        random.choices([*string.ascii_lowercase, *string.digits], k=40)
+    )
+    master_repl_offset = 0
 
 
 def rdb_file_process_expiry(f: BinaryIO, bytes_to_read: int) -> tuple[float, BinaryIO]:
@@ -183,15 +189,20 @@ def read_rdb_file_from_disk():
 
 
 async def handle_info_command(writer: asyncio.StreamWriter) -> None:
+    print(f"IS_MASTER = {IS_MASTER}")
     info_args = decode_simple_string()
     if info_args != "replication":
         raise ValueError("Invalid argument to `INFO` command! " f"(Given: {info_args})")
+    s = ""
     if IS_MASTER:
-        writer.write("$11\r\nrole:master\r\n".encode())
-        await writer.drain()
+        s += "role:master"
+        s += f"\nmaster_replid:{master_replid}"
+        s += f"\nmaster_repl_offset:{master_repl_offset}"
     else:
-        writer.write("$10\r\nrole:slave\r\n".encode())
-        await writer.drain()
+        s += "role:slave"
+    s = f"${len(s)}\r\n{s}\r\n"
+    writer.write(s.encode())
+    await writer.drain()
 
 
 async def handle_keys_command(writer: asyncio.StreamWriter) -> None:
