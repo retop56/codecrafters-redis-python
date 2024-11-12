@@ -1,5 +1,4 @@
 import asyncio
-import socket
 from collections import deque
 import time
 from typing import Optional, BinaryIO
@@ -376,6 +375,8 @@ async def connection_handler(
 ):
     while True:
         data = await reader.read(100)
+        if not data:
+            break
         print(f"Received {data}")
         # Remove any empty strings from message after splitting
         data = [chunk for chunk in data.decode().split("\r\n") if chunk]
@@ -388,45 +389,72 @@ async def connection_handler(
             case "*":
                 await decode_array(writer)
             case _:
-                raise ValueError("Huh?")
+                return
 
 
-def replica_handshake() -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        HOST, PORT = args.replicaof.split()
-        s.connect((HOST, int(PORT)))
-        s.sendall("*1\r\n$4\r\nPING\r\n".encode())
-        data = s.recv(1024)
-        if data.decode() != "+PONG\r\n":
-            raise ValueError(
-                "Expected '+PONG\\r\\n' in response to 'PING'. "
-                f"Instead, got {data.decode()}"
-            )
-        s.sendall(
-            f"*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n{args.port}\r\n".encode()
+async def skip_past_rdb_file_sent_over_wire(replica_reader: asyncio.StreamReader):
+    data = await replica_reader.read(1)
+    if data.decode() != "$":
+        raise ValueError(
+            "Expected '$' before length of rdb_file sent by Master. "
+            f"Instead, got '{data.decode()}'"
         )
-        data = s.recv(1024)
-        if data.decode() != "+OK\r\n":
-            raise ValueError(
-                "Expected '+OK\\r\\n' in response to first 'REPLCONF'. "
-                f"Instead, got {data.decode()}"
-            )
-        s.sendall("*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n".encode())
-        data = s.recv(1024)
-        if data.decode() != "+OK\r\n":
-            raise ValueError(
-                "Expected '+OK\\r\\n' in response to second 'REPLCONF'. "
-                f"Instead, got {data.decode()}"
-            )
-        s.sendall("*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n".encode())
-        data = s.recv(1024)
+    length_of_rdb_file = ""
+    while True:
+        b = await replica_reader.read(1)
+        if b.decode() == "\r":
+            break
+        length_of_rdb_file += b.decode()
+    # Adding 1 to skip past '\n' before rdb_file data starts
+    await replica_reader.read(int(length_of_rdb_file) + 1)
+
+
+async def replica_handshake(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    print("Replica handshake start")
+    writer.write("*1\r\n$4\r\nPING\r\n".encode())
+    await writer.drain()
+    data = await reader.read(1024)
+    if data.decode() != "+PONG\r\n":
+        raise ValueError(
+            "Expected '+PONG\\r\\n' in response to 'PING'. "
+            f"Instead, got {data.decode()}"
+        )
+    writer.write(
+        f"*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n{args.port}\r\n".encode()
+    )
+    await writer.drain()
+    data = await reader.read(1024)
+    if data.decode() != "+OK\r\n":
+        raise ValueError(
+            "Expected '+OK\\r\\n' in response to first 'REPLCONF'. "
+            f"Instead, got {data.decode()}"
+        )
+    writer.write("*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n".encode())
+    await writer.drain()
+    data = await reader.read(1024)
+    if data.decode() != "+OK\r\n":
+        raise ValueError(
+            "Expected '+OK\\r\\n' in response to second 'REPLCONF'. "
+            f"Instead, got {data.decode()}"
+        )
+    writer.write("*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n".encode())
+    psync_response = await reader.read(56)
+    print(f"psync_response = {psync_response}")
 
 
 async def replica_start() -> None:
-    replica_handshake()
+    HOST, PORT = args.replicaof.split()
+    replica_reader, replica_writer = await asyncio.open_connection(HOST, PORT)
+    await replica_handshake(replica_reader, replica_writer)
+    print("Replica handshake done")
+    await skip_past_rdb_file_sent_over_wire(replica_reader)
     server_socket = await asyncio.start_server(
         connection_handler, "localhost", args.port
     )
+    # asyncio.create_task(connection_handler(replica_reader, replica_writer))
+    await connection_handler(replica_reader, replica_writer)
     async with server_socket:
         await server_socket.serve_forever()
 
