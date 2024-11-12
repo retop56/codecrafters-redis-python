@@ -340,7 +340,7 @@ async def connection_handler(
                 raise ValueError("Huh?")
 
 
-async def replica_start():
+def replica_handshake() -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         HOST, PORT = args.replicaof.split()
         s.connect((HOST, int(PORT)))
@@ -367,6 +367,12 @@ async def replica_start():
                 "Expected '+OK\\r\\n' in response to second 'REPLCONF'. "
                 f"Instead, got {data.decode()}"
             )
+        s.sendall("*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n".encode())
+        data = s.recv(1024)
+
+
+async def replica_start() -> None:
+    replica_handshake()
     server_socket = await asyncio.start_server(
         connection_handler, "localhost", args.port
     )
