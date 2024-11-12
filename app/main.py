@@ -189,6 +189,19 @@ def read_rdb_file_from_disk():
         return
 
 
+async def handle_replconf_command(writer: asyncio.StreamWriter) -> None:
+    s = decode_simple_string()
+    match s:
+        case "listening-port":
+            decode_simple_string()
+        case "capa":
+            decode_simple_string()
+        case _:
+            raise ValueError("Unable to process `REPLCONF` command!")
+    writer.write("+OK\r\n".encode())
+    await writer.drain()
+
+
 async def handle_info_command(writer: asyncio.StreamWriter) -> None:
     print(f"IS_MASTER = {IS_MASTER}")
     info_args = decode_simple_string()
@@ -314,8 +327,7 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
             case "INFO":
                 await handle_info_command(writer)
             case "REPLCONF":
-                writer.write("+OK\r\n".encode())
-                await writer.drain()
+                await handle_replconf_command(writer)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
 
