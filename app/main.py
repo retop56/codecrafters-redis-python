@@ -33,6 +33,7 @@ if args.replicaof:
     IS_MASTER = False
 else:
     IS_MASTER = True
+    connected_replicas: dict[tuple[str, int], asyncio.StreamWriter] = {}
     master_replid = "".join(
         random.choices([*string.ascii_lowercase, *string.digits], k=40)
     )
