@@ -10,6 +10,13 @@ import string
 command_queue = deque()
 key_store: dict[str, tuple[str, Optional[float]]] = {}
 """key --> (value, expiry)"""
+empty_rdb_file_hex = bytes.fromhex(
+    "524544495330303131fa0972656469732d766572053"
+    "72e322e30fa0a72656469732d62697473c040fa0563"
+    "74696d65c26d08bc65fa08757365642d6d656dc2b0c"
+    "41000fa08616f662d62617365c000fff06e3bfec0ff"
+    "5aa2"
+)
 
 
 parser = argparse.ArgumentParser(
@@ -201,6 +208,8 @@ async def handle_psync_command(writer: asyncio.StreamWriter) -> None:
             "Expected `-1` as second argument to `PSYNC` command. " f"Instead, got {s}"
         )
     writer.write(f"+FULLRESYNC {master_replid} 0\r\n".encode())
+    await writer.drain()
+    writer.write(f"${len(empty_rdb_file_hex)}\r\n".encode() + empty_rdb_file_hex)
     await writer.drain()
 
 
