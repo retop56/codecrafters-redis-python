@@ -1,4 +1,5 @@
 import asyncio
+import socket
 from collections import deque
 import time
 from typing import Optional, BinaryIO
@@ -336,7 +337,19 @@ async def connection_handler(
                 raise ValueError("Huh?")
 
 
-async def main():
+async def replica_start():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        HOST, PORT = args.replicaof.split()
+        s.connect((HOST, int(PORT)))
+        s.sendall("*1\r\n$4\r\nPING\r\n".encode())
+    server_socket = await asyncio.start_server(
+        connection_handler, "localhost", args.port
+    )
+    async with server_socket:
+        await server_socket.serve_forever()
+
+
+async def master_start():
     server_socket = await asyncio.start_server(
         connection_handler, "localhost", args.port
     )
@@ -345,5 +358,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    read_rdb_file_from_disk()
-    asyncio.run(main())
+    if IS_MASTER:
+        read_rdb_file_from_disk()
+        asyncio.run(master_start())
+    else:
+        asyncio.run(replica_start())
