@@ -225,6 +225,10 @@ async def handle_replconf_command(writer: asyncio.StreamWriter) -> None:
             raise ValueError("Unable to process `REPLCONF` command!")
     writer.write("+OK\r\n".encode())
     await writer.drain()
+    global connected_replicas
+    if IS_MASTER:
+        replica_conn_info = writer.get_extra_info("peername")
+        connected_replicas[replica_conn_info] = writer
 
 
 async def handle_info_command(writer: asyncio.StreamWriter) -> None:
