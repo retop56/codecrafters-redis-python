@@ -189,6 +189,21 @@ def read_rdb_file_from_disk():
         return
 
 
+async def handle_psync_command(writer: asyncio.StreamWriter) -> None:
+    s = decode_simple_string()
+    if s != "?":
+        raise ValueError(
+            "Expected `?` as first argument to `PSYNC` command. " f"Instead, got {s}"
+        )
+    s = decode_simple_string()
+    if s != "-1":
+        raise ValueError(
+            "Expected `-1` as second argument to `PSYNC` command. " f"Instead, got {s}"
+        )
+    writer.write(f"+FULLRESYNC {master_replid} 0\r\n".encode())
+    await writer.drain()
+
+
 async def handle_replconf_command(writer: asyncio.StreamWriter) -> None:
     s = decode_simple_string()
     match s:
@@ -328,6 +343,8 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
                 await handle_info_command(writer)
             case "REPLCONF":
                 await handle_replconf_command(writer)
+            case "PSYNC":
+                await handle_psync_command(writer)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
 
