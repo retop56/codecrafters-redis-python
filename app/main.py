@@ -313,8 +313,16 @@ async def handle_set_command(writer: asyncio.StreamWriter) -> None:
         expiry_time = None
     key_store[key] = (val, expiry_time)
     print(f"Set {key} to {(val, expiry_time)}")
-    writer.write("+OK\r\n".encode())
-    await writer.drain()
+    if IS_MASTER:
+        writer.write("+OK\r\n".encode())
+        await writer.drain()
+        global connected_replicas
+        command_to_replicate = (
+            f"*3\r\n$3\r\nSET\r\n${len(key)}\r\n{key}\r\n${len(val)}\r\n{val}\r\n"
+        )
+        for replica_conn in connected_replicas.values():
+            replica_conn.write(command_to_replicate.encode())
+            await writer.drain()
 
 
 async def handle_echo_command(writer: asyncio.StreamWriter) -> None:
