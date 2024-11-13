@@ -291,20 +291,21 @@ def handle_config_command(writer: asyncio.StreamWriter) -> None:
             writer.write(response.encode())
 
 
-def handle_get_command(writer: asyncio.StreamWriter) -> None:
+def handle_get_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     print("Entered 'handle_get_command' function")
-    key = decode_bulk_string()
+    key, byte_ptr = decode_bulk_string(byte_ptr)
     if key not in key_store:
         writer.write("$-1\r\n".encode())
-        return
+        return byte_ptr
     val, expiry = key_store[key]
     if expiry is None:
         writer.write(f"${len(val)}\r\n{val}\r\n".encode())
-        return
+        return byte_ptr
     if time.time() > expiry:
         writer.write("$-1\r\n".encode())
-        return
+        return byte_ptr
     writer.write(f"${len(val)}\r\n{val}\r\n".encode())
+    return byte_ptr
 
 
 def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
@@ -314,9 +315,8 @@ def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     print(f"byte_ptr after decoding key-val: {byte_ptr}")
     # Check for expiry
     try:
-        if len(command_deque) > (byte_ptr + 1) and (
-            "".join((command_deque[c] for c in range(byte_ptr, byte_ptr + 2))) == "px"
-        ):
+        possible_px, _ = decode_bulk_string(byte_ptr)
+        if possible_px.lower() == "px":
             _, byte_ptr = decode_bulk_string(byte_ptr)
             exp, byte_ptr = decode_bulk_string(byte_ptr)
             expiry_length_seconds = float(exp) / 1000
@@ -324,7 +324,7 @@ def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
         else:
             expiry_time = None
     except NotEnoughBytesToProcessCommand:
-        pass
+        expiry_time = None
     key_store[key] = (val, expiry_time)
     print(f"Set {key} --> {(val, expiry_time)}")
     if IS_MASTER:
@@ -408,7 +408,7 @@ def decode_array(writer: asyncio.StreamWriter) -> int:
                 case "SET":
                     byte_ptr = handle_set_command(writer, byte_ptr)
                 case "GET":
-                    handle_get_command(writer)
+                    byte_ptr = handle_get_command(writer, byte_ptr)
                 case "CONFIG":
                     handle_config_command(writer)
                 case "KEYS":
@@ -423,8 +423,8 @@ def decode_array(writer: asyncio.StreamWriter) -> int:
                     raise ValueError(f"Unrecognized command: {s}")
             for _ in range(byte_ptr):
                 command_deque.popleft()
-                bytes_processed = byte_ptr
-                byte_ptr = 0
+            bytes_processed = byte_ptr
+            byte_ptr = 0
         return bytes_processed
     except NotEnoughBytesToProcessCommand as err:
         print(
