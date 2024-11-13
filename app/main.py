@@ -6,7 +6,7 @@ import argparse
 import random
 import string
 
-command_queue = deque()
+command_queue: deque[str] = deque()
 key_store: dict[str, tuple[str, Optional[float]]] = {}
 """key --> (value, expiry)"""
 empty_rdb_file_hex = bytes.fromhex(
@@ -30,7 +30,7 @@ args = parser.parse_args()
 
 if args.replicaof:
     IS_MASTER = False
-    replica_still_writing = False
+    replica_offset = 0
 else:
     IS_MASTER = True
     connected_replicas: dict[tuple[str, int], asyncio.StreamWriter] = {}
@@ -38,6 +38,7 @@ else:
         random.choices([*string.ascii_lowercase, *string.digits], k=40)
     )
     master_repl_offset = 0
+temp_bytes_processed = 0
 
 
 def rdb_file_process_expiry(f: BinaryIO, bytes_to_read: int) -> tuple[float, BinaryIO]:
@@ -214,16 +215,22 @@ def handle_psync_command(writer: asyncio.StreamWriter) -> None:
 
 def handle_replconf_command(writer: asyncio.StreamWriter) -> None:
     s = decode_bulk_string()
+    print(f"matching s in replconf function: {s}")
     match s:
         case "listening-port":
             decode_bulk_string()
-            writer.write("+OK\r\n".encode())
+            if IS_MASTER:
+                writer.write("+OK\r\n".encode())
         case "capa":
             decode_bulk_string()
-            writer.write("+OK\r\n".encode())
+            if IS_MASTER:
+                writer.write("+OK\r\n".encode())
         case "GETACK":
             decode_bulk_string()
-            resp = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n"
+            resp = (
+                f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(str(replica_offset))}"
+                f"\r\n{replica_offset}\r\n"
+            )
             writer.write(resp.encode())
         case _:
             raise ValueError("Unable to process `REPLCONF` command!")
@@ -324,6 +331,8 @@ def handle_echo_command(writer: asyncio.StreamWriter) -> None:
 
 
 def decode_bulk_string() -> str:
+    # Adding length of command + 2 for '\r\n' that comes afterwards but is missing because of
+    # split before adding to command_queue
     # Remove $<length-of-string>
     if command_queue.popleft().startswith("$") is False:
         raise ValueError("Simple String must be preceded by '$<length-of-string>'")
@@ -347,7 +356,8 @@ def decode_array(writer: asyncio.StreamWriter) -> None:
             s = decode_bulk_string()
             match s:
                 case "PING":
-                    writer.write("+PONG\r\n".encode())
+                    if IS_MASTER:
+                        writer.write("+PONG\r\n".encode())
                 case "ECHO":
                     handle_echo_command(writer)
                 case "SET":
@@ -454,7 +464,6 @@ async def replica_start() -> None:
     server_socket = await asyncio.start_server(
         connection_handler, "localhost", args.port
     )
-    # asyncio.create_task(connection_handler(replica_reader, replica_writer))
     await connection_handler(replica_reader, replica_writer)
     print("Right after connection handler started for replica")
     async with server_socket:
