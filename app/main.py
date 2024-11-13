@@ -198,12 +198,12 @@ def read_rdb_file_from_disk():
 
 
 def handle_psync_command(writer: asyncio.StreamWriter) -> None:
-    s = decode_simple_string()
+    s = decode_bulk_string()
     if s != "?":
         raise ValueError(
             "Expected `?` as first argument to `PSYNC` command. " f"Instead, got {s}"
         )
-    s = decode_simple_string()
+    s = decode_bulk_string()
     if s != "-1":
         raise ValueError(
             "Expected `-1` as second argument to `PSYNC` command. " f"Instead, got {s}"
@@ -213,15 +213,20 @@ def handle_psync_command(writer: asyncio.StreamWriter) -> None:
 
 
 def handle_replconf_command(writer: asyncio.StreamWriter) -> None:
-    s = decode_simple_string()
+    s = decode_bulk_string()
     match s:
         case "listening-port":
-            decode_simple_string()
+            decode_bulk_string()
+            writer.write("+OK\r\n".encode())
         case "capa":
-            decode_simple_string()
+            decode_bulk_string()
+            writer.write("+OK\r\n".encode())
+        case "GETACK":
+            decode_bulk_string()
+            resp = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n"
+            writer.write(resp.encode())
         case _:
             raise ValueError("Unable to process `REPLCONF` command!")
-    writer.write("+OK\r\n".encode())
     global connected_replicas
     if IS_MASTER:
         replica_conn_info = writer.get_extra_info("peername")
@@ -230,7 +235,7 @@ def handle_replconf_command(writer: asyncio.StreamWriter) -> None:
 
 def handle_info_command(writer: asyncio.StreamWriter) -> None:
     print(f"IS_MASTER = {IS_MASTER}")
-    info_args = decode_simple_string()
+    info_args = decode_bulk_string()
     if info_args != "replication":
         raise ValueError("Invalid argument to `INFO` command! " f"(Given: {info_args})")
     s = ""
@@ -245,7 +250,7 @@ def handle_info_command(writer: asyncio.StreamWriter) -> None:
 
 
 def handle_keys_command(writer: asyncio.StreamWriter) -> None:
-    c = decode_simple_string()
+    c = decode_bulk_string()
     if c != "*":
         raise ValueError(
             f"Can only handle '*' argument to keys command! " f"(Given: {c})"
@@ -257,12 +262,12 @@ def handle_keys_command(writer: asyncio.StreamWriter) -> None:
 
 
 def handle_config_command(writer: asyncio.StreamWriter) -> None:
-    get_command = decode_simple_string()
+    get_command = decode_bulk_string()
     if get_command != "GET":
         raise ValueError(
             f"'CONFIG' needs to be followed by 'GET'.\n" f"Instead, got {get_command}"
         )
-    match decode_simple_string():
+    match decode_bulk_string():
         case "dir":
             response = f"*2\r\n$3\r\ndir\r\n${len(args.dir)}\r\n{args.dir}\r\n"
             writer.write(response.encode())
@@ -276,7 +281,7 @@ def handle_config_command(writer: asyncio.StreamWriter) -> None:
 
 def handle_get_command(writer: asyncio.StreamWriter) -> None:
     print("Entered 'handle_get_command' function")
-    key = decode_simple_string()
+    key = decode_bulk_string()
     if key not in key_store:
         writer.write("$-1\r\n".encode())
         return
@@ -291,13 +296,13 @@ def handle_get_command(writer: asyncio.StreamWriter) -> None:
 
 
 def handle_set_command(writer: asyncio.StreamWriter) -> None:
-    key = decode_simple_string()
-    val = decode_simple_string()
+    key = decode_bulk_string()
+    val = decode_bulk_string()
     print(f"Decoded key-val: {key} --> {val}")
     print(f"Command queue after decoding key-val: {command_queue}")
     if len(command_queue) > 1 and command_queue[1].lower() == "px":
-        decode_simple_string()
-        expiry_length_seconds = float(decode_simple_string()) / 1000
+        decode_bulk_string()
+        expiry_length_seconds = float(decode_bulk_string()) / 1000
         expiry_time = time.time() + expiry_length_seconds
     else:
         expiry_time = None
@@ -314,13 +319,14 @@ def handle_set_command(writer: asyncio.StreamWriter) -> None:
 
 
 def handle_echo_command(writer: asyncio.StreamWriter) -> None:
-    c = decode_simple_string()
+    c = decode_bulk_string()
     writer.write(f"${len(c)}\r\n{c}\r\n".encode())
 
 
-def decode_simple_string() -> str:
+def decode_bulk_string() -> str:
     # Remove $<length-of-string>
-    command_queue.popleft()
+    if command_queue.popleft().startswith("$") is False:
+        raise ValueError("Simple String must be preceded by '$<length-of-string>'")
     return command_queue.popleft()
 
 
@@ -338,7 +344,7 @@ def decode_array(writer: asyncio.StreamWriter) -> None:
             return
 
         if command_queue[0].startswith("$"):
-            s = decode_simple_string()
+            s = decode_bulk_string()
             match s:
                 case "PING":
                     writer.write("+PONG\r\n".encode())
