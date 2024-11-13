@@ -6,7 +6,8 @@ import argparse
 import random
 import string
 
-command_queue: deque[str] = deque()
+
+command_deque: deque[str] = deque()
 key_store: dict[str, tuple[str, Optional[float]]] = {}
 """key --> (value, expiry)"""
 empty_rdb_file_hex = bytes.fromhex(
@@ -16,6 +17,10 @@ empty_rdb_file_hex = bytes.fromhex(
     "41000fa08616f662d62617365c000fff06e3bfec0ff"
     "5aa2"
 )
+
+
+class NotEnoughBytesToProcessCommand(Exception):
+    pass
 
 
 parser = argparse.ArgumentParser(
@@ -38,7 +43,7 @@ else:
         random.choices([*string.ascii_lowercase, *string.digits], k=40)
     )
     master_repl_offset = 0
-temp_bytes_processed = 0
+bytes_received = 0
 
 
 def rdb_file_process_expiry(f: BinaryIO, bytes_to_read: int) -> tuple[float, BinaryIO]:
@@ -302,17 +307,24 @@ def handle_get_command(writer: asyncio.StreamWriter) -> None:
     writer.write(f"${len(val)}\r\n{val}\r\n".encode())
 
 
-def handle_set_command(writer: asyncio.StreamWriter) -> None:
-    key = decode_bulk_string()
-    val = decode_bulk_string()
+def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    key, byte_ptr = decode_bulk_string(byte_ptr)
+    val, byte_ptr = decode_bulk_string(byte_ptr)
     print(f"Decoded key-val: {key} --> {val}")
-    print(f"Command queue after decoding key-val: {command_queue}")
-    if len(command_queue) > 1 and command_queue[1].lower() == "px":
-        decode_bulk_string()
-        expiry_length_seconds = float(decode_bulk_string()) / 1000
-        expiry_time = time.time() + expiry_length_seconds
-    else:
-        expiry_time = None
+    print(f"byte_ptr after decoding key-val: {byte_ptr}")
+    # Check for expiry
+    try:
+        if len(command_deque) > (byte_ptr + 1) and (
+            "".join((command_deque[c] for c in range(byte_ptr, byte_ptr + 2))) == "px"
+        ):
+            _, byte_ptr = decode_bulk_string(byte_ptr)
+            exp, byte_ptr = decode_bulk_string(byte_ptr)
+            expiry_length_seconds = float(exp) / 1000
+            expiry_time = time.time() + expiry_length_seconds
+        else:
+            expiry_time = None
+    except NotEnoughBytesToProcessCommand:
+        pass
     key_store[key] = (val, expiry_time)
     print(f"Set {key} --> {(val, expiry_time)}")
     if IS_MASTER:
@@ -324,44 +336,77 @@ def handle_set_command(writer: asyncio.StreamWriter) -> None:
         for replica_conn in connected_replicas.values():
             replica_conn.write(command_to_replicate.encode())
 
+    return byte_ptr
 
-def handle_echo_command(writer: asyncio.StreamWriter) -> None:
-    c = decode_bulk_string()
+
+def handle_echo_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    print(f"Byte_ptr position when entering echo command: {byte_ptr}")
+    # Skip past "\r\n" after 'ECHO' command in queue
+    # byte_ptr += 2
+    c, byte_ptr = decode_bulk_string(byte_ptr)
     writer.write(f"${len(c)}\r\n{c}\r\n".encode())
+    return byte_ptr
 
 
-def decode_bulk_string() -> str:
-    # Adding length of command + 2 for '\r\n' that comes afterwards but is missing because of
-    # split before adding to command_queue
-    # Remove $<length-of-string>
-    if command_queue.popleft().startswith("$") is False:
-        raise ValueError("Simple String must be preceded by '$<length-of-string>'")
-    return command_queue.popleft()
+def handle_pong_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    if IS_MASTER:
+        writer.write("+PONG\r\n".encode())
+    # Skip past "\r\n" after 'PING' command in queue
+    # byte_ptr += 2
+    return byte_ptr
 
 
-def decode_array(writer: asyncio.StreamWriter) -> None:
-    # Turn "*<number>" into integer, then check whether we have that number of elements
-    # in command queue. If not, throw it back to connection handler to continue
-    # reading in bytes over connection into queue
-    while command_queue:
-        expected_queue_length = int(command_queue.popleft()[1:]) * 2
-        if expected_queue_length > len(command_queue):
-            print(
-                f"Expected queue length of {expected_queue_length}, "
-                f"actual queue length is {len(command_queue)}"
+def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
+    try:
+        if command_deque[byte_ptr] != "$":
+            raise ValueError(
+                f"Expected '$' before length of bulk string. Instead, got {command_deque[byte_ptr]}"
             )
-            return
+        # Skip past "$"
+        byte_ptr += 1
+        str_len = ""
+        while command_deque[byte_ptr] != "\r":
+            str_len += command_deque[byte_ptr]
+            byte_ptr += 1
+        # Advanced two more to skip past newline
+        byte_ptr += 2
+        str_len = int(str_len)
+        print(f"Length of bulk string to process = {str_len}")
+        start = byte_ptr
+        end = byte_ptr + str_len
+        print(f"Bulk string start ind, end ind: {start}, {end}")
+        result_str = "".join(command_deque[c] for c in range(start, end))
+        # Skip past "\r\n" after end of string-contents
+        byte_ptr = end + 2
+        return (result_str, byte_ptr)
+    except IndexError:
+        raise NotEnoughBytesToProcessCommand("decode_bulk_string")
 
-        if command_queue[0].startswith("$"):
-            s = decode_bulk_string()
+
+def decode_array(writer: asyncio.StreamWriter) -> int:
+    byte_ptr = 1
+    bytes_processed = 0
+    try:
+        # Get length of array
+        arr_length = ""
+        while command_deque[byte_ptr] != "\r":
+            arr_length += command_deque[byte_ptr]
+            byte_ptr += 1
+        arr_length = int(arr_length)
+        print(f"Length of array: {arr_length}")
+        while command_deque:
+            while byte_ptr < len(command_deque) and command_deque[byte_ptr] != "$":
+                byte_ptr += 1
+            print(f"byte_ptr before decoding command: {byte_ptr}")
+            s, byte_ptr = decode_bulk_string(byte_ptr)
+            print(f"Returned bulk string for decoding array: {s}")
             match s:
                 case "PING":
-                    if IS_MASTER:
-                        writer.write("+PONG\r\n".encode())
+                    byte_ptr = handle_pong_command(writer, byte_ptr)
                 case "ECHO":
-                    handle_echo_command(writer)
+                    byte_ptr = handle_echo_command(writer, byte_ptr)
                 case "SET":
-                    handle_set_command(writer)
+                    byte_ptr = handle_set_command(writer, byte_ptr)
                 case "GET":
                     handle_get_command(writer)
                 case "CONFIG":
@@ -376,6 +421,17 @@ def decode_array(writer: asyncio.StreamWriter) -> None:
                     handle_psync_command(writer)
                 case _:
                     raise ValueError(f"Unrecognized command: {s}")
+            for _ in range(byte_ptr):
+                command_deque.popleft()
+                bytes_processed = byte_ptr
+                byte_ptr = 0
+        return bytes_processed
+    except NotEnoughBytesToProcessCommand as err:
+        print(
+            f"'{err.args}' did not have enough bytes to process command. "
+            "Going back to connection handler."
+        )
+        return 0
 
 
 async def connection_handler(
@@ -386,20 +442,19 @@ async def connection_handler(
         if not data:
             break
         print(f"Received {data}")
-        # Remove any empty strings from message after splitting
-        data = [chunk for chunk in data.decode().split("\r\n") if chunk]
-        for d in data:
-            command_queue.append(d)
-        print(f"Updated command queue: {command_queue}")
-        # Checking first character of first item in command queue
-        if command_queue:
-            match command_queue[0][0]:
+        for d in data.decode():
+            command_deque.append(d)
+        print(f"Updated command queue: {command_deque}")
+        if command_deque:
+            match command_deque[0]:
                 case "*":
                     print("About to start decoding array")
-                    decode_array(writer)
+                    bytes_processed = decode_array(writer)
+                    if IS_MASTER is False:
+                        global replica_offset
+                        replica_offset += bytes_processed
                     await writer.drain()
                 case _:
-                    # await asyncio.sleep(0)
                     break
 
 
