@@ -275,6 +275,7 @@ def handle_config_command(writer: asyncio.StreamWriter) -> None:
 
 
 def handle_get_command(writer: asyncio.StreamWriter) -> None:
+    print("Entered 'handle_get_command' function")
     key = decode_simple_string()
     if key not in key_store:
         writer.write("$-1\r\n".encode())
@@ -301,7 +302,7 @@ def handle_set_command(writer: asyncio.StreamWriter) -> None:
     else:
         expiry_time = None
     key_store[key] = (val, expiry_time)
-    print(f"Set {key} to {(val, expiry_time)}")
+    print(f"Set {key} --> {(val, expiry_time)}")
     if IS_MASTER:
         writer.write("+OK\r\n".encode())
         global connected_replicas
@@ -327,37 +328,38 @@ def decode_array(writer: asyncio.StreamWriter) -> None:
     # Turn "*<number>" into integer, then check whether we have that number of elements
     # in command queue. If not, throw it back to connection handler to continue
     # reading in bytes over connection into queue
-    expected_queue_length = int(command_queue.popleft()[1:])
-    if (expected_queue_length * 2) > len(command_queue):
-        print(
-            f"Expected queue length of {expected_queue_length * 2}, "
-            f"actual queue length is {len(command_queue)}"
-        )
-        return
+    while command_queue:
+        expected_queue_length = int(command_queue.popleft()[1:]) * 2
+        if expected_queue_length > len(command_queue):
+            print(
+                f"Expected queue length of {expected_queue_length}, "
+                f"actual queue length is {len(command_queue)}"
+            )
+            return
 
-    if command_queue[0].startswith("$"):
-        s = decode_simple_string()
-        match s:
-            case "PING":
-                writer.write("+PONG\r\n".encode())
-            case "ECHO":
-                handle_echo_command(writer)
-            case "SET":
-                handle_set_command(writer)
-            case "GET":
-                handle_get_command(writer)
-            case "CONFIG":
-                handle_config_command(writer)
-            case "KEYS":
-                handle_keys_command(writer)
-            case "INFO":
-                handle_info_command(writer)
-            case "REPLCONF":
-                handle_replconf_command(writer)
-            case "PSYNC":
-                handle_psync_command(writer)
-            case _:
-                raise ValueError(f"Unrecognized command: {s}")
+        if command_queue[0].startswith("$"):
+            s = decode_simple_string()
+            match s:
+                case "PING":
+                    writer.write("+PONG\r\n".encode())
+                case "ECHO":
+                    handle_echo_command(writer)
+                case "SET":
+                    handle_set_command(writer)
+                case "GET":
+                    handle_get_command(writer)
+                case "CONFIG":
+                    handle_config_command(writer)
+                case "KEYS":
+                    handle_keys_command(writer)
+                case "INFO":
+                    handle_info_command(writer)
+                case "REPLCONF":
+                    handle_replconf_command(writer)
+                case "PSYNC":
+                    handle_psync_command(writer)
+                case _:
+                    raise ValueError(f"Unrecognized command: {s}")
 
 
 async def connection_handler(
@@ -373,15 +375,16 @@ async def connection_handler(
         for d in data:
             command_queue.append(d)
         print(f"Updated command queue: {command_queue}")
-
         # Checking first character of first item in command queue
-        match command_queue[0][0]:
-            case "*":
-                print("About to start decoding array")
-                decode_array(writer)
-                await writer.drain()
-            case _:
-                await asyncio.sleep(0)
+        if command_queue:
+            match command_queue[0][0]:
+                case "*":
+                    print("About to start decoding array")
+                    decode_array(writer)
+                    await writer.drain()
+                case _:
+                    # await asyncio.sleep(0)
+                    break
 
 
 async def skip_past_rdb_file_sent_over_wire(replica_reader: asyncio.StreamReader):
