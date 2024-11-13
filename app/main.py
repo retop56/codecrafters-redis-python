@@ -30,6 +30,7 @@ args = parser.parse_args()
 
 if args.replicaof:
     IS_MASTER = False
+    replica_still_writing = False
 else:
     IS_MASTER = True
     connected_replicas: dict[tuple[str, int], asyncio.StreamWriter] = {}
@@ -196,7 +197,7 @@ def read_rdb_file_from_disk():
         return
 
 
-async def handle_psync_command(writer: asyncio.StreamWriter) -> None:
+def handle_psync_command(writer: asyncio.StreamWriter) -> None:
     s = decode_simple_string()
     if s != "?":
         raise ValueError(
@@ -208,12 +209,10 @@ async def handle_psync_command(writer: asyncio.StreamWriter) -> None:
             "Expected `-1` as second argument to `PSYNC` command. " f"Instead, got {s}"
         )
     writer.write(f"+FULLRESYNC {master_replid} 0\r\n".encode())
-    await writer.drain()
     writer.write(f"${len(empty_rdb_file_hex)}\r\n".encode() + empty_rdb_file_hex)
-    await writer.drain()
 
 
-async def handle_replconf_command(writer: asyncio.StreamWriter) -> None:
+def handle_replconf_command(writer: asyncio.StreamWriter) -> None:
     s = decode_simple_string()
     match s:
         case "listening-port":
@@ -223,14 +222,13 @@ async def handle_replconf_command(writer: asyncio.StreamWriter) -> None:
         case _:
             raise ValueError("Unable to process `REPLCONF` command!")
     writer.write("+OK\r\n".encode())
-    await writer.drain()
     global connected_replicas
     if IS_MASTER:
         replica_conn_info = writer.get_extra_info("peername")
         connected_replicas[replica_conn_info] = writer
 
 
-async def handle_info_command(writer: asyncio.StreamWriter) -> None:
+def handle_info_command(writer: asyncio.StreamWriter) -> None:
     print(f"IS_MASTER = {IS_MASTER}")
     info_args = decode_simple_string()
     if info_args != "replication":
@@ -244,10 +242,9 @@ async def handle_info_command(writer: asyncio.StreamWriter) -> None:
         s += "role:slave"
     s = f"${len(s)}\r\n{s}\r\n"
     writer.write(s.encode())
-    await writer.drain()
 
 
-async def handle_keys_command(writer: asyncio.StreamWriter) -> None:
+def handle_keys_command(writer: asyncio.StreamWriter) -> None:
     c = decode_simple_string()
     if c != "*":
         raise ValueError(
@@ -257,10 +254,9 @@ async def handle_keys_command(writer: asyncio.StreamWriter) -> None:
     for k in key_store:
         s += f"${len(k)}\r\n{k}\r\n"
     writer.write(s.encode())
-    await writer.drain()
 
 
-async def handle_config_command(writer: asyncio.StreamWriter) -> None:
+def handle_config_command(writer: asyncio.StreamWriter) -> None:
     get_command = decode_simple_string()
     if get_command != "GET":
         raise ValueError(
@@ -270,36 +266,30 @@ async def handle_config_command(writer: asyncio.StreamWriter) -> None:
         case "dir":
             response = f"*2\r\n$3\r\ndir\r\n${len(args.dir)}\r\n{args.dir}\r\n"
             writer.write(response.encode())
-            await writer.drain()
         case "dbfilename":
             response = (
                 f"*2\r\n$10\r\ndbfilename\r\n"
                 f"${len(args.dbfilename)}\r\n{args.dbfilename}\r\n"
             )
             writer.write(response.encode())
-            await writer.drain()
 
 
-async def handle_get_command(writer: asyncio.StreamWriter) -> None:
+def handle_get_command(writer: asyncio.StreamWriter) -> None:
     key = decode_simple_string()
     if key not in key_store:
         writer.write("$-1\r\n".encode())
-        await writer.drain()
         return
     val, expiry = key_store[key]
     if expiry is None:
         writer.write(f"${len(val)}\r\n{val}\r\n".encode())
-        await writer.drain()
         return
     if time.time() > expiry:
         writer.write("$-1\r\n".encode())
-        await writer.drain()
         return
     writer.write(f"${len(val)}\r\n{val}\r\n".encode())
-    await writer.drain()
 
 
-async def handle_set_command(writer: asyncio.StreamWriter) -> None:
+def handle_set_command(writer: asyncio.StreamWriter) -> None:
     key = decode_simple_string()
     val = decode_simple_string()
     print(f"Decoded key-val: {key} --> {val}")
@@ -314,20 +304,17 @@ async def handle_set_command(writer: asyncio.StreamWriter) -> None:
     print(f"Set {key} to {(val, expiry_time)}")
     if IS_MASTER:
         writer.write("+OK\r\n".encode())
-        await writer.drain()
         global connected_replicas
         command_to_replicate = (
             f"*3\r\n$3\r\nSET\r\n${len(key)}\r\n{key}\r\n${len(val)}\r\n{val}\r\n"
         )
         for replica_conn in connected_replicas.values():
             replica_conn.write(command_to_replicate.encode())
-            await writer.drain()
 
 
-async def handle_echo_command(writer: asyncio.StreamWriter) -> None:
+def handle_echo_command(writer: asyncio.StreamWriter) -> None:
     c = decode_simple_string()
     writer.write(f"${len(c)}\r\n{c}\r\n".encode())
-    await writer.drain()
 
 
 def decode_simple_string() -> str:
@@ -336,12 +323,16 @@ def decode_simple_string() -> str:
     return command_queue.popleft()
 
 
-async def decode_array(writer: asyncio.StreamWriter) -> None:
+def decode_array(writer: asyncio.StreamWriter) -> None:
     # Turn "*<number>" into integer, then check whether we have that number of elements
     # in command queue. If not, throw it back to connection handler to continue
     # reading in bytes over connection into queue
-    expected_array_length = int(command_queue.popleft()[1:])
-    if (expected_array_length * 2) < len(command_queue):
+    expected_queue_length = int(command_queue.popleft()[1:])
+    if (expected_queue_length * 2) > len(command_queue):
+        print(
+            f"Expected queue length of {expected_queue_length * 2}, "
+            f"actual queue length is {len(command_queue)}"
+        )
         return
 
     if command_queue[0].startswith("$"):
@@ -349,23 +340,22 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
         match s:
             case "PING":
                 writer.write("+PONG\r\n".encode())
-                await writer.drain()
             case "ECHO":
-                await handle_echo_command(writer)
+                handle_echo_command(writer)
             case "SET":
-                await handle_set_command(writer)
+                handle_set_command(writer)
             case "GET":
-                await handle_get_command(writer)
+                handle_get_command(writer)
             case "CONFIG":
-                await handle_config_command(writer)
+                handle_config_command(writer)
             case "KEYS":
-                await handle_keys_command(writer)
+                handle_keys_command(writer)
             case "INFO":
-                await handle_info_command(writer)
+                handle_info_command(writer)
             case "REPLCONF":
-                await handle_replconf_command(writer)
+                handle_replconf_command(writer)
             case "PSYNC":
-                await handle_psync_command(writer)
+                handle_psync_command(writer)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
 
@@ -387,9 +377,11 @@ async def connection_handler(
         # Checking first character of first item in command queue
         match command_queue[0][0]:
             case "*":
-                await decode_array(writer)
+                print("About to start decoding array")
+                decode_array(writer)
+                await writer.drain()
             case _:
-                return
+                await asyncio.sleep(0)
 
 
 async def skip_past_rdb_file_sent_over_wire(replica_reader: asyncio.StreamReader):
@@ -455,7 +447,9 @@ async def replica_start() -> None:
     )
     # asyncio.create_task(connection_handler(replica_reader, replica_writer))
     await connection_handler(replica_reader, replica_writer)
+    print("Right after connection handler started for replica")
     async with server_socket:
+        print("Right before serve_forever")
         await server_socket.serve_forever()
 
 
