@@ -261,8 +261,8 @@ def handle_info_command(writer: asyncio.StreamWriter) -> None:
     writer.write(s.encode())
 
 
-def handle_keys_command(writer: asyncio.StreamWriter) -> None:
-    c = decode_bulk_string()
+def handle_keys_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    c, byte_ptr = decode_bulk_string(byte_ptr)
     if c != "*":
         raise ValueError(
             f"Can only handle '*' argument to keys command! " f"(Given: {c})"
@@ -271,24 +271,32 @@ def handle_keys_command(writer: asyncio.StreamWriter) -> None:
     for k in key_store:
         s += f"${len(k)}\r\n{k}\r\n"
     writer.write(s.encode())
+    return byte_ptr
 
 
-def handle_config_command(writer: asyncio.StreamWriter) -> None:
-    get_command = decode_bulk_string()
+def handle_config_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    get_command, byte_ptr = decode_bulk_string(byte_ptr)
     if get_command != "GET":
         raise ValueError(
             f"'CONFIG' needs to be followed by 'GET'.\n" f"Instead, got {get_command}"
         )
-    match decode_bulk_string():
+    next_command, byte_ptr = decode_bulk_string(byte_ptr)
+    match next_command:
         case "dir":
             response = f"*2\r\n$3\r\ndir\r\n${len(args.dir)}\r\n{args.dir}\r\n"
             writer.write(response.encode())
+            return byte_ptr
         case "dbfilename":
             response = (
                 f"*2\r\n$10\r\ndbfilename\r\n"
                 f"${len(args.dbfilename)}\r\n{args.dbfilename}\r\n"
             )
             writer.write(response.encode())
+            return byte_ptr
+        case _:
+            raise ValueError(
+                f"Don't recognize argument to `CONFIG` command. (Given: {next_command})"
+            )
 
 
 def handle_get_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
@@ -410,9 +418,9 @@ def decode_array(writer: asyncio.StreamWriter) -> int:
                 case "GET":
                     byte_ptr = handle_get_command(writer, byte_ptr)
                 case "CONFIG":
-                    handle_config_command(writer)
+                    byte_ptr = handle_config_command(writer, byte_ptr)
                 case "KEYS":
-                    handle_keys_command(writer)
+                    byte_ptr = handle_keys_command(writer, byte_ptr)
                 case "INFO":
                     handle_info_command(writer)
                 case "REPLCONF":
