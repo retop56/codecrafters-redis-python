@@ -203,6 +203,13 @@ def read_rdb_file_from_disk():
         return
 
 
+def handle_wait_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    first_num, byte_ptr = decode_bulk_string(byte_ptr)
+    second_num, byte_ptr = decode_bulk_string(byte_ptr)
+    writer.write(":0\r\n".encode())
+    return byte_ptr
+
+
 def handle_psync_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     s, byte_ptr = decode_bulk_string(byte_ptr)
     if s != "?":
@@ -354,8 +361,6 @@ def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
 
 def handle_echo_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     print(f"Byte_ptr position when entering echo command: {byte_ptr}")
-    # Skip past "\r\n" after 'ECHO' command in queue
-    # byte_ptr += 2
     c, byte_ptr = decode_bulk_string(byte_ptr)
     writer.write(f"${len(c)}\r\n{c}\r\n".encode())
     return byte_ptr
@@ -437,6 +442,8 @@ def decode_array(writer: asyncio.StreamWriter) -> None:
                     byte_ptr = handle_replconf_command(writer, byte_ptr)
                 case "PSYNC":
                     byte_ptr = handle_psync_command(writer, byte_ptr)
+                case "WAIT":
+                    byte_ptr = handle_wait_command(writer, byte_ptr)
                 case _:
                     raise ValueError(f"Unrecognized command: {s}")
             for _ in range(byte_ptr):
