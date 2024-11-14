@@ -203,14 +203,15 @@ def read_rdb_file_from_disk():
         return
 
 
-def handle_wait_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_wait_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     first_num, byte_ptr = decode_bulk_string(byte_ptr)
     second_num, byte_ptr = decode_bulk_string(byte_ptr)
     writer.write(f":{len(connected_replicas)}\r\n".encode())
+    await writer.drain()
     return byte_ptr
 
 
-def handle_psync_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_psync_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     s, byte_ptr = decode_bulk_string(byte_ptr)
     if s != "?":
         raise ValueError(
@@ -222,12 +223,14 @@ def handle_psync_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
             "Expected `-1` as second argument to `PSYNC` command. " f"Instead, got {s}"
         )
     writer.write(f"+FULLRESYNC {master_replid} 0\r\n".encode())
+    await writer.drain()
     writer.write(f"${len(empty_rdb_file_hex)}\r\n".encode() + empty_rdb_file_hex)
+    await writer.drain()
 
     return byte_ptr
 
 
-def handle_replconf_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_replconf_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     s, byte_ptr = decode_bulk_string(byte_ptr)
     print(f"matching s in replconf function: {s}")
     match s:
@@ -235,10 +238,12 @@ def handle_replconf_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
             _, byte_ptr = decode_bulk_string(byte_ptr)
             if IS_MASTER:
                 writer.write("+OK\r\n".encode())
+                await writer.drain()
         case "capa":
             _, byte_ptr = decode_bulk_string(byte_ptr)
             if IS_MASTER:
                 writer.write("+OK\r\n".encode())
+                await writer.drain()
         case "GETACK":
             _, byte_ptr = decode_bulk_string(byte_ptr)
             resp = (
@@ -246,6 +251,7 @@ def handle_replconf_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
                 f"\r\n{replica_offset}\r\n"
             )
             writer.write(resp.encode())
+            await writer.drain()
         case _:
             raise ValueError("Unable to process `REPLCONF` command!")
     global connected_replicas
@@ -256,7 +262,7 @@ def handle_replconf_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     return byte_ptr
 
 
-def handle_info_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_info_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     print(f"IS_MASTER = {IS_MASTER}")
     info_args, byte_ptr = decode_bulk_string(byte_ptr)
     if info_args != "replication":
@@ -270,10 +276,11 @@ def handle_info_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
         s += "role:slave"
     s = f"${len(s)}\r\n{s}\r\n"
     writer.write(s.encode())
+    await writer.drain()
     return byte_ptr
 
 
-def handle_keys_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_keys_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     c, byte_ptr = decode_bulk_string(byte_ptr)
     if c != "*":
         raise ValueError(
@@ -283,10 +290,11 @@ def handle_keys_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     for k in key_store:
         s += f"${len(k)}\r\n{k}\r\n"
     writer.write(s.encode())
+    await writer.drain()
     return byte_ptr
 
 
-def handle_config_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_config_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     get_command, byte_ptr = decode_bulk_string(byte_ptr)
     if get_command != "GET":
         raise ValueError(
@@ -297,6 +305,7 @@ def handle_config_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
         case "dir":
             response = f"*2\r\n$3\r\ndir\r\n${len(args.dir)}\r\n{args.dir}\r\n"
             writer.write(response.encode())
+            await writer.drain()
             return byte_ptr
         case "dbfilename":
             response = (
@@ -304,6 +313,7 @@ def handle_config_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
                 f"${len(args.dbfilename)}\r\n{args.dbfilename}\r\n"
             )
             writer.write(response.encode())
+            await writer.drain()
             return byte_ptr
         case _:
             raise ValueError(
@@ -311,24 +321,28 @@ def handle_config_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
             )
 
 
-def handle_get_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_get_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     print("Entered 'handle_get_command' function")
     key, byte_ptr = decode_bulk_string(byte_ptr)
     if key not in key_store:
         writer.write("$-1\r\n".encode())
+        await writer.drain()
         return byte_ptr
     val, expiry = key_store[key]
     if expiry is None:
         writer.write(f"${len(val)}\r\n{val}\r\n".encode())
+        await writer.drain()
         return byte_ptr
     if time.time() > expiry:
         writer.write("$-1\r\n".encode())
+        await writer.drain()
         return byte_ptr
     writer.write(f"${len(val)}\r\n{val}\r\n".encode())
+    await writer.drain()
     return byte_ptr
 
 
-def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     key, byte_ptr = decode_bulk_string(byte_ptr)
     val, byte_ptr = decode_bulk_string(byte_ptr)
     print(f"Decoded key-val: {key} --> {val}")
@@ -349,6 +363,7 @@ def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     print(f"Set {key} --> {(val, expiry_time)}")
     if IS_MASTER:
         writer.write("+OK\r\n".encode())
+        await writer.drain()
         global connected_replicas
         command_to_replicate = (
             f"*3\r\n$3\r\nSET\r\n${len(key)}\r\n{key}\r\n${len(val)}\r\n{val}\r\n"
@@ -359,16 +374,18 @@ def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     return byte_ptr
 
 
-def handle_echo_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_echo_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     print(f"Byte_ptr position when entering echo command: {byte_ptr}")
     c, byte_ptr = decode_bulk_string(byte_ptr)
     writer.write(f"${len(c)}\r\n{c}\r\n".encode())
+    await writer.drain()
     return byte_ptr
 
 
-def handle_pong_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_pong_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     if IS_MASTER:
         writer.write("+PONG\r\n".encode())
+        await writer.drain()
     return byte_ptr
 
 
@@ -400,63 +417,57 @@ def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
         raise NotEnoughBytesToProcessCommand("decode_bulk_string")
 
 
-def decode_array(writer: asyncio.StreamWriter) -> None:
+async def decode_array(writer: asyncio.StreamWriter) -> None:
     byte_ptr = 0
-    try:
-        while command_deque:
-            if command_deque[byte_ptr] != "*":
-                raise ValueError(
-                    f"Array is supposed to start with '*' "
-                    f"(Current byte_ptr = {byte_ptr}, "
-                    f"current char at byte_ptr = {command_deque[byte_ptr]}"
-                )
+    while command_deque:
+        if command_deque[byte_ptr] != "*":
+            raise ValueError(
+                f"Array is supposed to start with '*' "
+                f"(Current byte_ptr = {byte_ptr}, "
+                f"current char at byte_ptr = {command_deque[byte_ptr]}"
+            )
+        byte_ptr += 1
+        # Get length of array
+        arr_length = ""
+        while command_deque[byte_ptr] != "\r":
+            arr_length += command_deque[byte_ptr]
             byte_ptr += 1
-            # Get length of array
-            arr_length = ""
-            while command_deque[byte_ptr] != "\r":
-                arr_length += command_deque[byte_ptr]
-                byte_ptr += 1
-            arr_length = int(arr_length)
-            print(f"Length of array: {arr_length}")
-            while byte_ptr < len(command_deque) and command_deque[byte_ptr] != "$":
-                byte_ptr += 1
-            print(f"byte_ptr before decoding command: {byte_ptr}")
-            s, byte_ptr = decode_bulk_string(byte_ptr)
-            print(f"Returned bulk string for decoding array: {s}")
-            match s:
-                case "PING":
-                    byte_ptr = handle_pong_command(writer, byte_ptr)
-                case "ECHO":
-                    byte_ptr = handle_echo_command(writer, byte_ptr)
-                case "SET":
-                    byte_ptr = handle_set_command(writer, byte_ptr)
-                case "GET":
-                    byte_ptr = handle_get_command(writer, byte_ptr)
-                case "CONFIG":
-                    byte_ptr = handle_config_command(writer, byte_ptr)
-                case "KEYS":
-                    byte_ptr = handle_keys_command(writer, byte_ptr)
-                case "INFO":
-                    byte_ptr = handle_info_command(writer, byte_ptr)
-                case "REPLCONF":
-                    byte_ptr = handle_replconf_command(writer, byte_ptr)
-                case "PSYNC":
-                    byte_ptr = handle_psync_command(writer, byte_ptr)
-                case "WAIT":
-                    byte_ptr = handle_wait_command(writer, byte_ptr)
-                case _:
-                    raise ValueError(f"Unrecognized command: {s}")
-            for _ in range(byte_ptr):
-                command_deque.popleft()
-            if IS_MASTER is False:
-                global replica_offset
-                replica_offset += byte_ptr
-            byte_ptr = 0
-    except NotEnoughBytesToProcessCommand as err:
-        print(
-            f"'{err.args}' did not have enough bytes to process command. "
-            "Going back to connection handler."
-        )
+        arr_length = int(arr_length)
+        print(f"Length of array: {arr_length}")
+        while byte_ptr < len(command_deque) and command_deque[byte_ptr] != "$":
+            byte_ptr += 1
+        print(f"byte_ptr before decoding command: {byte_ptr}")
+        s, byte_ptr = decode_bulk_string(byte_ptr)
+        print(f"Returned bulk string for decoding array: {s}")
+        match s:
+            case "PING":
+                byte_ptr = await handle_pong_command(writer, byte_ptr)
+            case "ECHO":
+                byte_ptr = await handle_echo_command(writer, byte_ptr)
+            case "SET":
+                byte_ptr = await handle_set_command(writer, byte_ptr)
+            case "GET":
+                byte_ptr = await handle_get_command(writer, byte_ptr)
+            case "CONFIG":
+                byte_ptr = await handle_config_command(writer, byte_ptr)
+            case "KEYS":
+                byte_ptr = await handle_keys_command(writer, byte_ptr)
+            case "INFO":
+                byte_ptr = await handle_info_command(writer, byte_ptr)
+            case "REPLCONF":
+                byte_ptr = await handle_replconf_command(writer, byte_ptr)
+            case "PSYNC":
+                byte_ptr = await handle_psync_command(writer, byte_ptr)
+            case "WAIT":
+                byte_ptr = await handle_wait_command(writer, byte_ptr)
+            case _:
+                raise ValueError(f"Unrecognized command: {s}")
+        for _ in range(byte_ptr):
+            command_deque.popleft()
+        if IS_MASTER is False:
+            global replica_offset
+            replica_offset += byte_ptr
+        byte_ptr = 0
 
 
 async def connection_handler(
@@ -474,8 +485,13 @@ async def connection_handler(
             match command_deque[0]:
                 case "*":
                     print("About to start decoding array")
-                    decode_array(writer)
-                    await writer.drain()
+                    try:
+                        await decode_array(writer)
+                    except NotEnoughBytesToProcessCommand as err:
+                        print(
+                            f"'{err.args}' did not have enough bytes to process command. "
+                            "Now back in connection handler."
+                        )
                 case _:
                     break
 
@@ -528,6 +544,7 @@ async def replica_handshake(
             f"Instead, got {data.decode()}"
         )
     writer.write("*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n".encode())
+    await writer.drain()
     psync_response = await reader.read(56)
     print(f"psync_response = {psync_response}")
 
