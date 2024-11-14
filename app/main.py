@@ -206,7 +206,7 @@ def read_rdb_file_from_disk():
 def handle_wait_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     first_num, byte_ptr = decode_bulk_string(byte_ptr)
     second_num, byte_ptr = decode_bulk_string(byte_ptr)
-    writer.write(":0\r\n".encode())
+    writer.write(f":{len(connected_replicas)}\r\n".encode())
     return byte_ptr
 
 
