@@ -5,13 +5,14 @@ from typing import Optional, BinaryIO
 import argparse
 import random
 import string
-from enum import Enum
+
+# from enum import Enum
 
 
 command_deque: deque[str] = deque()
 # key_store: dict[str, tuple[str, Optional[float]]] = {}
 # """key --> (value, expiry)"""
-key_store: dict[str, "HashEntry"] = {}
+key_store: dict[str, "HashValue"] = {}
 
 empty_rdb_file_hex = bytes.fromhex(
     "524544495330303131fa0972656469732d766572053"
@@ -22,44 +23,41 @@ empty_rdb_file_hex = bytes.fromhex(
 )
 
 
-class HashEntry:
-    def __init__(
-        self, value: "HashEntryValue", expiry: Optional[float], keytype: "KeyType"
-    ) -> None:
-        self.value = value
-        self.expiry = expiry
-        self.keytype = keytype
+class HashValue:
+    def __init__(self) -> None:
+        pass
 
     def str_repr_of_val(self) -> str:
-        match self.value:
-            case StringValue():
-                return f"${len(self.value.str_val)}\r\n{self.value.str_val}\r\n"
-            case StreamValue():
-                return str(self.value.stream_val)
-            case _:
-                raise ValueError(
-                    "Unable to generate string representation of hash entry value! "
-                    f"(Hash entry type: {type(self.value)})"
-                )
+        return ""
 
 
-class HashEntryValue:
-    pass
-
-
-class StringValue(HashEntryValue):
-    def __init__(self, str_val: str) -> None:
+class StringValue(HashValue):
+    def __init__(self, str_val: str, expiry: Optional[float]) -> None:
         self.str_val = str_val
+        self.expiry = expiry
+
+    def str_repr_of_val(self) -> str:
+        return f"${len(self.str_val)}\r\n{self.str_val}\r\n"
 
 
-class StreamValue(HashEntryValue):
-    def __init__(self, stream_val: dict) -> None:
-        self.stream_val = stream_val
+class StreamValue(HashValue):
+    """
+    Structure of entry in key_store with StreamEntry value
+    ```
+    key_store {
+        stream_key: StreamEntry {
+                                entry_id: {
+                                    entry_key_1: entry_val_1,
+                                    entry_key_2: entry_val_2,
+                                    etc.
+                    }
+            }
+    }
+    ```
+    """
 
-
-class KeyType(Enum):
-    String = "string"
-    Stream = "stream"
+    def __init__(self, entry_dict: dict) -> None:
+        self.entry_dict = entry_dict
 
 
 class NotEnoughBytesToProcessCommand(Exception):
@@ -108,7 +106,7 @@ def rdb_file_process_ht_entry(f: BinaryIO) -> BinaryIO:
         case b"\x00":
             key, f = rdb_file_process_string_encoded_value(f)
             val, f = rdb_file_process_string_encoded_value(f)
-            key_store[key] = HashEntry(StringValue(val), None, KeyType.String)
+            key_store[key] = StringValue(str_val=val, expiry=None)
         # Indicates that this key has an expire, and that the expire
         # timestamp is expressed in milliseconds
         case b"\xFC":
@@ -120,7 +118,7 @@ def rdb_file_process_ht_entry(f: BinaryIO) -> BinaryIO:
                 raise ValueError(f"Invalid key_value type! (Found: {f.read(1)})")
             key, f = rdb_file_process_string_encoded_value(f)
             val, f = rdb_file_process_string_encoded_value(f)
-            key_store[key] = HashEntry(StringValue(val), expiry, KeyType.String)
+            key_store[key] = StringValue(str_val=val, expiry=expiry)
         # Indicates that this key ("baz") has an expire,
         # and that the expire timestamp is expressed in seconds. */
         case b"\xFD":
@@ -130,7 +128,7 @@ def rdb_file_process_ht_entry(f: BinaryIO) -> BinaryIO:
                 raise ValueError(f"Invalid key_value type! (Found: {f.read(1)})")
             key, f = rdb_file_process_string_encoded_value(f)
             val, f = rdb_file_process_string_encoded_value(f)
-            key_store[key] = HashEntry(StringValue(val), expiry, KeyType.String)
+            key_store[key] = StringValue(str_val=val, expiry=expiry)
         case _:
             raise ValueError("Unable to process hash-table entry from RDB file!")
 
@@ -259,43 +257,51 @@ async def handle_xadd_command(
     writer: asyncio.StreamWriter, byte_ptr: int, command_length: int
 ) -> int:
     stream_key, byte_ptr = decode_bulk_string(byte_ptr)
+    print(f"Stream key: {stream_key}")
     command_length -= 1
     entry_id, byte_ptr = decode_bulk_string(byte_ptr)
     command_length -= 1
-    entry_key_value_pairs = {}
-    if (command_length % 2) != 0:
-        raise ValueError(
-            "Supposed to be even number of items left in command "
-            "(one key --> one value = one kv-pair)"
-        )
-    num_of_kv_pairs_in_entry = int(command_length / 2)
-    for _ in range(num_of_kv_pairs_in_entry):
-        entry_key, byte_ptr = decode_bulk_string(byte_ptr)
-        entry_val, byte_ptr = decode_bulk_string(byte_ptr)
-        entry_key_value_pairs[entry_key] = entry_val
-
-    if stream_key in key_store:
-        existing_entry = key_store[stream_key]
-        existing_entry.value
-    he = HashEntry(
-        value=StreamValue({entry_id: entry_key_value_pairs}),
-        expiry=None,
-        keytype=KeyType.Stream,
-    )
-    key_store[stream_key] = he
+    print(f"Entry ID: {entry_id}")
+    if stream_key not in key_store:
+        entry_dict = {}
+        if (command_length % 2) != 0:
+            raise ValueError(
+                "Supposed to be even number of items left in command "
+                "(one key --> one value = one kv-pair)"
+            )
+        num_of_kv_pairs_in_entry = int(command_length / 2)
+        for _ in range(num_of_kv_pairs_in_entry):
+            key, byte_ptr = decode_bulk_string(byte_ptr)
+            val, byte_ptr = decode_bulk_string(byte_ptr)
+            entry_dict[key] = val
+        stream_entry = StreamValue(entry_dict=entry_dict)
+        key_store[stream_key] = stream_entry
+        writer.write(f"${len(entry_id)}\r\n{entry_id}\r\n".encode())
+        await writer.drain()
+        return byte_ptr
 
     return byte_ptr
 
 
 async def handle_type_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     key, byte_ptr = decode_bulk_string(byte_ptr)
-    if key in key_store:
-        _type = key_store[key].keytype
-        writer.write(f"+{_type.value}\r\n".encode())
-        await writer.drain()
-    else:
+    if key not in key_store:
         writer.write("+none\r\n".encode())
         await writer.drain()
+        return byte_ptr
+    match key_store[key]:
+        case StringValue():
+            writer.write("+string\r\n".encode())
+            await writer.drain()
+        case StreamValue():
+            writer.write("+stream\r\n".encode())
+            await writer.drain()
+        case _:
+            raise TypeError(
+                "Unable to handle type command of value associated "
+                "with given key! "
+                f"(Key: {key}\nValue: {repr(key_store[key])}"
+            )
     return byte_ptr
 
 
@@ -427,18 +433,21 @@ async def handle_get_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int
         await writer.drain()
         return byte_ptr
     entry = key_store[key]
-    if entry.expiry is None:
-
-        writer.write(entry.str_repr_of_val().encode())
-        await writer.drain()
-        return byte_ptr
-    if time.time() > entry.expiry:
-        writer.write("$-1\r\n".encode())
-        await writer.drain()
-        return byte_ptr
-    writer.write(entry.str_repr_of_val().encode())
-    await writer.drain()
-    return byte_ptr
+    match entry:
+        case StringValue():
+            if entry.expiry is None:
+                writer.write(entry.str_repr_of_val().encode())
+                await writer.drain()
+                return byte_ptr
+            if time.time() > entry.expiry:
+                writer.write("$-1\r\n".encode())
+                await writer.drain()
+                return byte_ptr
+            writer.write(entry.str_repr_of_val().encode())
+            await writer.drain()
+            return byte_ptr
+        case _:
+            raise TypeError("Unable to process get command with given key")
 
 
 async def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
@@ -458,8 +467,9 @@ async def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int
             expiry_time = None
     except (NotEnoughBytesToProcessCommand, ValueError):
         expiry_time = None
-    key_store[key] = HashEntry(StringValue(val), expiry_time, KeyType.String)
-    print(f"Set {key} --> {(val, expiry_time, {KeyType.String})}")
+    entry_val = StringValue(str_val=val, expiry=expiry_time)
+    key_store[key] = entry_val
+    print(f"Set {key} --> {repr(entry_val)}")
     if IS_MASTER:
         writer.write("+OK\r\n".encode())
         await writer.drain()
@@ -562,7 +572,9 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
             case "TYPE":
                 byte_ptr = await handle_type_command(writer, byte_ptr)
             case "XADD":
-                byte_ptr = await handle_xadd_command(writer, byte_ptr, arr_length)
+                # subtracting 1 from arr_length to account for 'XADD' bulk string
+                # being processed already
+                byte_ptr = await handle_xadd_command(writer, byte_ptr, arr_length - 1)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
         for _ in range(byte_ptr):
