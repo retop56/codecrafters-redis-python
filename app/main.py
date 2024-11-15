@@ -5,11 +5,14 @@ from typing import Optional, BinaryIO
 import argparse
 import random
 import string
+from enum import Enum
 
 
 command_deque: deque[str] = deque()
-key_store: dict[str, tuple[str, Optional[float]]] = {}
-"""key --> (value, expiry)"""
+# key_store: dict[str, tuple[str, Optional[float]]] = {}
+# """key --> (value, expiry)"""
+key_store: dict[str, "HashEntry"] = {}
+
 empty_rdb_file_hex = bytes.fromhex(
     "524544495330303131fa0972656469732d766572053"
     "72e322e30fa0a72656469732d62697473c040fa0563"
@@ -17,6 +20,17 @@ empty_rdb_file_hex = bytes.fromhex(
     "41000fa08616f662d62617365c000fff06e3bfec0ff"
     "5aa2"
 )
+
+
+class HashEntry:
+    def __init__(self, value: str, expiry: Optional[float], keytype: "KeyType") -> None:
+        self.value = value
+        self.expiry = expiry
+        self.keytype = keytype
+
+
+class KeyType(Enum):
+    String = "string"
 
 
 class NotEnoughBytesToProcessCommand(Exception):
@@ -65,7 +79,7 @@ def rdb_file_process_ht_entry(f: BinaryIO) -> BinaryIO:
         case b"\x00":
             key, f = rdb_file_process_string_encoded_value(f)
             val, f = rdb_file_process_string_encoded_value(f)
-            key_store[key] = (val, None)
+            key_store[key] = HashEntry(val, None, KeyType.String)
         # Indicates that this key has an expire, and that the expire
         # timestamp is expressed in milliseconds
         case b"\xFC":
@@ -77,7 +91,7 @@ def rdb_file_process_ht_entry(f: BinaryIO) -> BinaryIO:
                 raise ValueError(f"Invalid key_value type! (Found: {f.read(1)})")
             key, f = rdb_file_process_string_encoded_value(f)
             val, f = rdb_file_process_string_encoded_value(f)
-            key_store[key] = (val, expiry)
+            key_store[key] = HashEntry(val, expiry, KeyType.String)
         # Indicates that this key ("baz") has an expire,
         # and that the expire timestamp is expressed in seconds. */
         case b"\xFD":
@@ -87,7 +101,7 @@ def rdb_file_process_ht_entry(f: BinaryIO) -> BinaryIO:
                 raise ValueError(f"Invalid key_value type! (Found: {f.read(1)})")
             key, f = rdb_file_process_string_encoded_value(f)
             val, f = rdb_file_process_string_encoded_value(f)
-            key_store[key] = (val, expiry)
+            key_store[key] = HashEntry(val, expiry, KeyType.String)
         case _:
             raise ValueError("Unable to process hash-table entry from RDB file!")
 
@@ -203,9 +217,32 @@ def read_rdb_file_from_disk():
         return
 
 
+def update_offset(byte_ptr: int) -> None:
+    if IS_MASTER is False:
+        global replica_offset
+        replica_offset += byte_ptr
+    else:
+        global master_repl_offset
+        master_repl_offset += byte_ptr
+
+
+async def handle_type_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    key, byte_ptr = decode_bulk_string(byte_ptr)
+    if key in key_store:
+        _type = key_store[key].keytype
+        writer.write(f"+{_type.value}\r\n".encode())
+        await writer.drain()
+    else:
+        writer.write("+none\r\n".encode())
+        await writer.drain()
+    return byte_ptr
+
+
 async def handle_wait_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
-    first_num, byte_ptr = decode_bulk_string(byte_ptr)
-    second_num, byte_ptr = decode_bulk_string(byte_ptr)
+    print("Entered handle_wait_command")
+    num_replicas, byte_ptr = decode_bulk_string(byte_ptr)
+    timeout, byte_ptr = decode_bulk_string(byte_ptr)
+    # await asyncio.sleep(int(timeout) / 1000)
     writer.write(f":{len(connected_replicas)}\r\n".encode())
     await writer.drain()
     return byte_ptr
@@ -328,16 +365,16 @@ async def handle_get_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int
         writer.write("$-1\r\n".encode())
         await writer.drain()
         return byte_ptr
-    val, expiry = key_store[key]
-    if expiry is None:
-        writer.write(f"${len(val)}\r\n{val}\r\n".encode())
+    entry = key_store[key]
+    if entry.expiry is None:
+        writer.write(f"${len(entry.value)}\r\n{entry.value}\r\n".encode())
         await writer.drain()
         return byte_ptr
-    if time.time() > expiry:
+    if time.time() > entry.expiry:
         writer.write("$-1\r\n".encode())
         await writer.drain()
         return byte_ptr
-    writer.write(f"${len(val)}\r\n{val}\r\n".encode())
+    writer.write(f"${len(entry.value)}\r\n{entry.value}\r\n".encode())
     await writer.drain()
     return byte_ptr
 
@@ -359,8 +396,8 @@ async def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int
             expiry_time = None
     except (NotEnoughBytesToProcessCommand, ValueError):
         expiry_time = None
-    key_store[key] = (val, expiry_time)
-    print(f"Set {key} --> {(val, expiry_time)}")
+    key_store[key] = HashEntry(val, expiry_time, KeyType.String)
+    print(f"Set {key} --> {(val, expiry_time, {KeyType.String})}")
     if IS_MASTER:
         writer.write("+OK\r\n".encode())
         await writer.drain()
@@ -460,13 +497,13 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
                 byte_ptr = await handle_psync_command(writer, byte_ptr)
             case "WAIT":
                 byte_ptr = await handle_wait_command(writer, byte_ptr)
+            case "TYPE":
+                byte_ptr = await handle_type_command(writer, byte_ptr)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
         for _ in range(byte_ptr):
             command_deque.popleft()
-        if IS_MASTER is False:
-            global replica_offset
-            replica_offset += byte_ptr
+        update_offset(byte_ptr)
         byte_ptr = 0
 
 
