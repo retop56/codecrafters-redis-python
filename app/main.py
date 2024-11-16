@@ -1,7 +1,7 @@
 import asyncio
 from collections import deque
 import time
-from typing import Optional, BinaryIO
+from typing import Optional, BinaryIO, cast
 import argparse
 import random
 import string
@@ -244,6 +244,14 @@ def read_rdb_file_from_disk():
         return
 
 
+def clear_bad_command(byte_ptr: int) -> int:
+    for _ in range(byte_ptr):
+        command_deque.popleft()
+    while command_deque and command_deque[0] != "*":
+        command_deque.popleft()
+    return 0
+
+
 def update_offset(byte_ptr: int) -> None:
     if IS_MASTER is False:
         global replica_offset
@@ -262,24 +270,87 @@ async def handle_xadd_command(
     entry_id, byte_ptr = decode_bulk_string(byte_ptr)
     command_length -= 1
     print(f"Entry ID: {entry_id}")
+    if (command_length % 2) != 0:
+        raise ValueError(
+            "Supposed to be even number of items left in command "
+            "(one key --> one value = one kv-pair)"
+        )
     if stream_key not in key_store:
         entry_dict = {}
-        if (command_length % 2) != 0:
-            raise ValueError(
-                "Supposed to be even number of items left in command "
-                "(one key --> one value = one kv-pair)"
-            )
         num_of_kv_pairs_in_entry = int(command_length / 2)
         for _ in range(num_of_kv_pairs_in_entry):
             key, byte_ptr = decode_bulk_string(byte_ptr)
             val, byte_ptr = decode_bulk_string(byte_ptr)
             entry_dict[key] = val
-        stream_entry = StreamValue(entry_dict=entry_dict)
+        stream_entry = StreamValue(entry_dict={entry_id: entry_dict})
         key_store[stream_key] = stream_entry
         writer.write(f"${len(entry_id)}\r\n{entry_id}\r\n".encode())
         await writer.drain()
         return byte_ptr
+    existing_entry = key_store[stream_key]
+    existing_entry = cast(StreamValue, existing_entry)
+    # Format of entry_id is <millisecondsTime>-<sequenceNumber>
+    millisecondsTime, sequenceNumber = entry_id.split("-")
+    # The <millisecondsTime> is greater than or equal to the <millisecondsTime>
+    # of the last entry
+    last_entry_id_time, last_entry_id_seq_num = list(existing_entry.entry_dict.keys())[
+        -1
+    ].split("-")
+    # If the stream is empty, the ID should be greater than 0-0
+    if int(millisecondsTime) <= 0 and int(sequenceNumber) <= 1:
+        writer.write(
+            "-ERR The ID specified in XADD must be greater than 0-0\r\n".encode()
+        )
+        await writer.drain()
+        print("-ERR The ID specified in XADD must be greater than 0-0")
+        byte_ptr = clear_bad_command(byte_ptr)
+        return byte_ptr
+    if millisecondsTime < last_entry_id_time:
+        writer.write(
+            "-ERR The ID specified in XADD is equal or smaller than "
+            "the target stream top item\r\n".encode()
+        )
+        await writer.drain()
+        print(
+            "-ERR The ID specified in XADD is equal or smaller "
+            "than the target stream top item\r\n"
+        )
+        byte_ptr = clear_bad_command(byte_ptr)
+        return byte_ptr
+    # If the millisecondsTime part of the ID is equal to the millisecondsTime
+    # of the last entry, the sequenceNumber part of the ID should be greater
+    # than the sequenceNumber of the last entry
+    if (
+        millisecondsTime == last_entry_id_time
+        and sequenceNumber <= last_entry_id_seq_num
+    ):
+        writer.write(
+            "-ERR The ID specified in XADD is equal or smaller than "
+            "the target stream top item\r\n".encode()
+        )
+        await writer.drain()
+        print(
+            "-ERR The ID specified in XADD is equal or smaller "
+            "than the target stream top item\r\n"
+        )
+        byte_ptr = clear_bad_command(byte_ptr)
+        return byte_ptr
+    num_of_kv_pairs_in_entry = int(command_length / 2)
+    # Process all entry k-v pairs into temp dict, then copy into existing entry dict
+    temp_dict = {}
+    for _ in range(num_of_kv_pairs_in_entry):
+        key, byte_ptr = decode_bulk_string(byte_ptr)
+        val, byte_ptr = decode_bulk_string(byte_ptr)
+        temp_dict[key] = val
 
+    for k, v in temp_dict.items():
+        if entry_id in existing_entry.entry_dict:
+            existing_entry.entry_dict[entry_id][k] = v
+        else:
+            existing_entry.entry_dict[entry_id] = {k: v}
+
+    writer.write(f"${len(entry_id)}\r\n{entry_id}\r\n".encode())
+    await writer.drain()
     return byte_ptr
 
 
