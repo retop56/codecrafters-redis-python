@@ -275,6 +275,30 @@ async def handle_xadd_command(
             "Supposed to be even number of items left in command "
             "(one key --> one value = one kv-pair)"
         )
+    # Format of entry_id is <millisecondsTime>-<sequenceNumber>
+    time, sequenceNumber = entry_id.split("-")
+    if sequenceNumber == "*":
+        if stream_key not in key_store and int(time) > 0:
+            sequenceNumber = "0"
+        elif stream_key not in key_store:
+            sequenceNumber = "1"
+        else:
+            stream_value_for_given_stream_key = cast(StreamValue, key_store[stream_key])
+            for k in reversed(stream_value_for_given_stream_key.entry_dict.keys()):
+                curr_time, curr_seq_num = k.split("-")
+                if time > curr_time:
+                    sequenceNumber = "0"
+                    break
+                if time == curr_time:
+                    sequenceNumber = str(int(curr_seq_num) + 1)
+                    break
+                if time < curr_time:
+                    continue
+            else:
+                sequenceNumber = "1"
+    # *********************
+    # * Create new stream *
+    # *********************
     if stream_key not in key_store:
         entry_dict = {}
         num_of_kv_pairs_in_entry = int(command_length / 2)
@@ -282,22 +306,22 @@ async def handle_xadd_command(
             key, byte_ptr = decode_bulk_string(byte_ptr)
             val, byte_ptr = decode_bulk_string(byte_ptr)
             entry_dict[key] = val
-        stream_entry = StreamValue(entry_dict={entry_id: entry_dict})
+        stream_entry = StreamValue(entry_dict={f"{time}-{sequenceNumber}": entry_dict})
         key_store[stream_key] = stream_entry
-        writer.write(f"${len(entry_id)}\r\n{entry_id}\r\n".encode())
+        writer.write(f"${len(entry_id)}\r\n{time}-{sequenceNumber}\r\n".encode())
         await writer.drain()
         return byte_ptr
-    existing_entry = key_store[stream_key]
-    existing_entry = cast(StreamValue, existing_entry)
-    # Format of entry_id is <millisecondsTime>-<sequenceNumber>
-    millisecondsTime, sequenceNumber = entry_id.split("-")
+    # ***************************
+    # * Add to exisiting stream *
+    # ***************************
+    existing_entry = cast(StreamValue, key_store[stream_key])
     # The <millisecondsTime> is greater than or equal to the <millisecondsTime>
     # of the last entry
     last_entry_id_time, last_entry_id_seq_num = list(existing_entry.entry_dict.keys())[
         -1
     ].split("-")
     # If the stream is empty, the ID should be greater than 0-0
-    if int(millisecondsTime) <= 0 and int(sequenceNumber) <= 1:
+    if int(time) <= 0 and int(sequenceNumber) <= 1:
         writer.write(
             "-ERR The ID specified in XADD must be greater than 0-0\r\n".encode()
         )
@@ -305,7 +329,7 @@ async def handle_xadd_command(
         print("-ERR The ID specified in XADD must be greater than 0-0")
         byte_ptr = clear_bad_command(byte_ptr)
         return byte_ptr
-    if millisecondsTime < last_entry_id_time:
+    if time < last_entry_id_time:
         writer.write(
             "-ERR The ID specified in XADD is equal or smaller than "
             "the target stream top item\r\n".encode()
@@ -320,10 +344,7 @@ async def handle_xadd_command(
     # If the millisecondsTime part of the ID is equal to the millisecondsTime
     # of the last entry, the sequenceNumber part of the ID should be greater
     # than the sequenceNumber of the last entry
-    if (
-        millisecondsTime == last_entry_id_time
-        and sequenceNumber <= last_entry_id_seq_num
-    ):
+    if time == last_entry_id_time and sequenceNumber <= last_entry_id_seq_num:
         writer.write(
             "-ERR The ID specified in XADD is equal or smaller than "
             "the target stream top item\r\n".encode()
@@ -342,14 +363,14 @@ async def handle_xadd_command(
         key, byte_ptr = decode_bulk_string(byte_ptr)
         val, byte_ptr = decode_bulk_string(byte_ptr)
         temp_dict[key] = val
-
+    new_entry_id = f"{time}-{sequenceNumber}"
     for k, v in temp_dict.items():
-        if entry_id in existing_entry.entry_dict:
-            existing_entry.entry_dict[entry_id][k] = v
+        if new_entry_id in existing_entry.entry_dict:
+            existing_entry.entry_dict[new_entry_id][k] = v
         else:
-            existing_entry.entry_dict[entry_id] = {k: v}
+            existing_entry.entry_dict[new_entry_id] = {k: v}
 
-    writer.write(f"${len(entry_id)}\r\n{entry_id}\r\n".encode())
+    writer.write(f"${len(entry_id)}\r\n{time}-{sequenceNumber}\r\n".encode())
     await writer.drain()
     return byte_ptr
 
