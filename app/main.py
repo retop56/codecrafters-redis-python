@@ -261,6 +261,29 @@ def update_offset(byte_ptr: int) -> None:
         master_repl_offset += byte_ptr
 
 
+def xadd_auto_gen_seq_num(time: str, stream_key: str) -> str:
+    if stream_key not in key_store and int(time) > 0:
+        return "0"
+    elif stream_key not in key_store:
+        return "1"
+    else:
+        stream_value_for_given_stream_key = cast(StreamValue, key_store[stream_key])
+        for k in reversed(stream_value_for_given_stream_key.entry_dict.keys()):
+            curr_time, curr_seq_num = k.split("-")
+            if time > curr_time:
+                return "0"
+            if time == curr_time:
+                return str(int(curr_seq_num) + 1)
+            if time < curr_time:
+                continue
+        return "1"
+
+
+def xadd_auto_gen_time_and_seq_num() -> tuple[str, str]:
+
+    return ("", "")
+
+
 async def handle_xadd_command(
     writer: asyncio.StreamWriter, byte_ptr: int, command_length: int
 ) -> int:
@@ -269,33 +292,19 @@ async def handle_xadd_command(
     command_length -= 1
     entry_id, byte_ptr = decode_bulk_string(byte_ptr)
     command_length -= 1
-    print(f"Entry ID: {entry_id}")
+    if entry_id == "*":
+        time, sequenceNumber = xadd_auto_gen_time_and_seq_num()
+    else:
+        # Format of entry_id is <millisecondsTime>-<sequenceNumber>
+        time, sequenceNumber = entry_id.split("-")
+        if sequenceNumber == "*":
+            sequenceNumber = xadd_auto_gen_seq_num(time, stream_key)
+    print(f"Entry ID: {time}-{sequenceNumber}")
     if (command_length % 2) != 0:
         raise ValueError(
             "Supposed to be even number of items left in command "
             "(one key --> one value = one kv-pair)"
         )
-    # Format of entry_id is <millisecondsTime>-<sequenceNumber>
-    time, sequenceNumber = entry_id.split("-")
-    if sequenceNumber == "*":
-        if stream_key not in key_store and int(time) > 0:
-            sequenceNumber = "0"
-        elif stream_key not in key_store:
-            sequenceNumber = "1"
-        else:
-            stream_value_for_given_stream_key = cast(StreamValue, key_store[stream_key])
-            for k in reversed(stream_value_for_given_stream_key.entry_dict.keys()):
-                curr_time, curr_seq_num = k.split("-")
-                if time > curr_time:
-                    sequenceNumber = "0"
-                    break
-                if time == curr_time:
-                    sequenceNumber = str(int(curr_seq_num) + 1)
-                    break
-                if time < curr_time:
-                    continue
-            else:
-                sequenceNumber = "1"
     # *********************
     # * Create new stream *
     # *********************
