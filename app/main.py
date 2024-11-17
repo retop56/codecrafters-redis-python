@@ -279,27 +279,23 @@ def xadd_auto_gen_seq_num(time: str, stream_key: str) -> str:
         return "1"
 
 
-def xadd_auto_gen_time_and_seq_num() -> tuple[str, str]:
-
-    return ("", "")
-
-
 async def handle_xadd_command(
     writer: asyncio.StreamWriter, byte_ptr: int, command_length: int
 ) -> int:
     stream_key, byte_ptr = decode_bulk_string(byte_ptr)
     print(f"Stream key: {stream_key}")
     command_length -= 1
-    entry_id, byte_ptr = decode_bulk_string(byte_ptr)
+    orig_entry_id, byte_ptr = decode_bulk_string(byte_ptr)
     command_length -= 1
-    if entry_id == "*":
-        time, sequenceNumber = xadd_auto_gen_time_and_seq_num()
+    if orig_entry_id == "*":
+        time_id, seqNum_id = str(int(time.time() * 1000)), "0"
     else:
         # Format of entry_id is <millisecondsTime>-<sequenceNumber>
-        time, sequenceNumber = entry_id.split("-")
-        if sequenceNumber == "*":
-            sequenceNumber = xadd_auto_gen_seq_num(time, stream_key)
-    print(f"Entry ID: {time}-{sequenceNumber}")
+        time_id, seqNum_id = orig_entry_id.split("-")
+        if seqNum_id == "*":
+            seqNum_id = xadd_auto_gen_seq_num(time_id, stream_key)
+    new_entry_id = f"{time_id}-{seqNum_id}"
+    print(f"Entry ID: {new_entry_id}")
     if (command_length % 2) != 0:
         raise ValueError(
             "Supposed to be even number of items left in command "
@@ -315,9 +311,9 @@ async def handle_xadd_command(
             key, byte_ptr = decode_bulk_string(byte_ptr)
             val, byte_ptr = decode_bulk_string(byte_ptr)
             entry_dict[key] = val
-        stream_entry = StreamValue(entry_dict={f"{time}-{sequenceNumber}": entry_dict})
+        stream_entry = StreamValue(entry_dict={new_entry_id: entry_dict})
         key_store[stream_key] = stream_entry
-        writer.write(f"${len(entry_id)}\r\n{time}-{sequenceNumber}\r\n".encode())
+        writer.write(f"${len(new_entry_id)}\r\n{new_entry_id}\r\n".encode())
         await writer.drain()
         return byte_ptr
     # ***************************
@@ -330,7 +326,7 @@ async def handle_xadd_command(
         -1
     ].split("-")
     # If the stream is empty, the ID should be greater than 0-0
-    if int(time) <= 0 and int(sequenceNumber) <= 1:
+    if int(time_id) <= 0 and int(seqNum_id) <= 1:
         writer.write(
             "-ERR The ID specified in XADD must be greater than 0-0\r\n".encode()
         )
@@ -338,7 +334,7 @@ async def handle_xadd_command(
         print("-ERR The ID specified in XADD must be greater than 0-0")
         byte_ptr = clear_bad_command(byte_ptr)
         return byte_ptr
-    if time < last_entry_id_time:
+    if time_id < last_entry_id_time:
         writer.write(
             "-ERR The ID specified in XADD is equal or smaller than "
             "the target stream top item\r\n".encode()
@@ -353,7 +349,7 @@ async def handle_xadd_command(
     # If the millisecondsTime part of the ID is equal to the millisecondsTime
     # of the last entry, the sequenceNumber part of the ID should be greater
     # than the sequenceNumber of the last entry
-    if time == last_entry_id_time and sequenceNumber <= last_entry_id_seq_num:
+    if time_id == last_entry_id_time and seqNum_id <= last_entry_id_seq_num:
         writer.write(
             "-ERR The ID specified in XADD is equal or smaller than "
             "the target stream top item\r\n".encode()
@@ -372,14 +368,13 @@ async def handle_xadd_command(
         key, byte_ptr = decode_bulk_string(byte_ptr)
         val, byte_ptr = decode_bulk_string(byte_ptr)
         temp_dict[key] = val
-    new_entry_id = f"{time}-{sequenceNumber}"
     for k, v in temp_dict.items():
         if new_entry_id in existing_entry.entry_dict:
             existing_entry.entry_dict[new_entry_id][k] = v
         else:
             existing_entry.entry_dict[new_entry_id] = {k: v}
 
-    writer.write(f"${len(entry_id)}\r\n{time}-{sequenceNumber}\r\n".encode())
+    writer.write(f"${len(new_entry_id)}\r\n{new_entry_id}\r\n".encode())
     await writer.drain()
     return byte_ptr
 
