@@ -261,6 +261,12 @@ def update_offset(byte_ptr: int) -> None:
         master_repl_offset += byte_ptr
 
 
+async def handle_xrange_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    start_id, byte_ptr = decode_bulk_string(byte_ptr)
+    end_id, byte_ptr = decode_bulk_string(byte_ptr)
+    return byte_ptr
+
+
 def xadd_auto_gen_seq_num(time: str, stream_key: str) -> str:
     if stream_key not in key_store and int(time) > 0:
         return "0"
@@ -279,6 +285,35 @@ def xadd_auto_gen_seq_num(time: str, stream_key: str) -> str:
         return "1"
 
 
+def xadd_gen_time_and_SeqNum(orig_entry_id: str, stream_key: str) -> tuple[str, str]:
+    if orig_entry_id == "*":
+        time_id = str(int(time.time() * 1000))
+        seqNum_id = "0"
+        return (time_id, seqNum_id)
+    # Format of entry_id is <millisecondsTime>-<sequenceNumber>
+    time_id, seqNum_id = orig_entry_id.split("-")
+    if seqNum_id == "*":
+        if stream_key not in key_store and int(time_id) > 0:
+            seqNum_id = "0"
+        elif stream_key not in key_store:
+            seqNum_id = "1"
+        else:
+            stream_value_for_given_stream_key = cast(StreamValue, key_store[stream_key])
+            for k in reversed(stream_value_for_given_stream_key.entry_dict.keys()):
+                curr_time, curr_seq_num = k.split("-")
+                if time_id > curr_time:
+                    seqNum_id = "0"
+                    break
+                if time_id == curr_time:
+                    seqNum_id = str(int(curr_seq_num) + 1)
+                    break
+                if time_id < curr_time:
+                    continue
+            else:
+                seqNum_id = "1"
+    return (time_id, seqNum_id)
+
+
 async def handle_xadd_command(
     writer: asyncio.StreamWriter, byte_ptr: int, command_length: int
 ) -> int:
@@ -287,13 +322,7 @@ async def handle_xadd_command(
     command_length -= 1
     orig_entry_id, byte_ptr = decode_bulk_string(byte_ptr)
     command_length -= 1
-    if orig_entry_id == "*":
-        time_id, seqNum_id = str(int(time.time() * 1000)), "0"
-    else:
-        # Format of entry_id is <millisecondsTime>-<sequenceNumber>
-        time_id, seqNum_id = orig_entry_id.split("-")
-        if seqNum_id == "*":
-            seqNum_id = xadd_auto_gen_seq_num(time_id, stream_key)
+    time_id, seqNum_id = xadd_gen_time_and_SeqNum(orig_entry_id, stream_key)
     new_entry_id = f"{time_id}-{seqNum_id}"
     print(f"Entry ID: {new_entry_id}")
     if (command_length % 2) != 0:
@@ -644,33 +673,35 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
         print(f"byte_ptr before decoding command: {byte_ptr}")
         s, byte_ptr = decode_bulk_string(byte_ptr)
         print(f"Returned bulk string for decoding array: {s}")
-        match s:
-            case "PING":
+        match s.lower():
+            case "ping":
                 byte_ptr = await handle_pong_command(writer, byte_ptr)
-            case "ECHO":
+            case "echo":
                 byte_ptr = await handle_echo_command(writer, byte_ptr)
-            case "SET":
+            case "set":
                 byte_ptr = await handle_set_command(writer, byte_ptr)
-            case "GET":
+            case "get":
                 byte_ptr = await handle_get_command(writer, byte_ptr)
-            case "CONFIG":
+            case "config":
                 byte_ptr = await handle_config_command(writer, byte_ptr)
-            case "KEYS":
+            case "keys":
                 byte_ptr = await handle_keys_command(writer, byte_ptr)
-            case "INFO":
+            case "info":
                 byte_ptr = await handle_info_command(writer, byte_ptr)
-            case "REPLCONF":
+            case "replconf":
                 byte_ptr = await handle_replconf_command(writer, byte_ptr)
-            case "PSYNC":
+            case "psync":
                 byte_ptr = await handle_psync_command(writer, byte_ptr)
-            case "WAIT":
+            case "wait":
                 byte_ptr = await handle_wait_command(writer, byte_ptr)
-            case "TYPE":
+            case "type":
                 byte_ptr = await handle_type_command(writer, byte_ptr)
-            case "XADD":
+            case "xadd":
                 # subtracting 1 from arr_length to account for 'XADD' bulk string
                 # being processed already
                 byte_ptr = await handle_xadd_command(writer, byte_ptr, arr_length - 1)
+            case "xrange":
+                byte_ptr = await handle_xrange_command(writer, byte_ptr)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
         for _ in range(byte_ptr):
