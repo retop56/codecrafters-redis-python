@@ -24,11 +24,7 @@ empty_rdb_file_hex = bytes.fromhex(
 
 
 class HashValue:
-    def __init__(self) -> None:
-        pass
-
-    def str_repr_of_val(self) -> str:
-        return ""
+    pass
 
 
 class StringValue(HashValue):
@@ -42,10 +38,10 @@ class StringValue(HashValue):
 
 class StreamValue(HashValue):
     """
-    Structure of entry in key_store with StreamEntry value
+    Structure of entry in key_store with StreamValue value
     ```
     key_store {
-        stream_key: StreamEntry {
+        stream_key: StreamValue {
                                 entry_id: {
                                     entry_key_1: entry_val_1,
                                     entry_key_2: entry_val_2,
@@ -58,6 +54,13 @@ class StreamValue(HashValue):
 
     def __init__(self, entry_dict: dict) -> None:
         self.entry_dict = entry_dict
+
+    def str_repr_of_val(self) -> str:
+        repr_str = ""
+        repr_str += f"*{len(self.entry_dict) * 2}\r\n"
+        for k, v in self.entry_dict.items():
+            repr_str += f"${len(k)}\r\n{k}\r\n${len(v)}\r\n{v}\r\n"
+        return repr_str
 
 
 class NotEnoughBytesToProcessCommand(Exception):
@@ -262,8 +265,25 @@ def update_offset(byte_ptr: int) -> None:
 
 
 async def handle_xrange_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    stream_key, byte_ptr = decode_bulk_string(byte_ptr)
     start_id, byte_ptr = decode_bulk_string(byte_ptr)
     end_id, byte_ptr = decode_bulk_string(byte_ptr)
+    entry_ids_in_given_stream = cast(
+        StreamValue, key_store[stream_key]
+    ).entry_dict.keys()
+    start_index = 0
+    for i, v in enumerate(entry_ids_in_given_stream):
+        curr_elem_time, _ = v.split("-")
+        if int(start_id) >= int(curr_elem_time):
+            start_index = i
+            break
+    else:
+        raise ValueError(f"Invalid start entry_id! (Given: {start_id})")
+    end_index = len(entry_ids_in_given_stream) - 1
+    while end_index >= start_index:
+        v = entry_ids_in_given_stream[end_index]
+        curr_elem_time, _ = v.split("-")
+
     return byte_ptr
 
 
@@ -285,7 +305,9 @@ def xadd_auto_gen_seq_num(time: str, stream_key: str) -> str:
         return "1"
 
 
-def xadd_gen_time_and_SeqNum(orig_entry_id: str, stream_key: str) -> tuple[str, str]:
+def gen_time_and_SeqNum_from_entry_id(
+    orig_entry_id: str, stream_key: str
+) -> tuple[str, str]:
     if orig_entry_id == "*":
         time_id = str(int(time.time() * 1000))
         seqNum_id = "0"
@@ -322,7 +344,7 @@ async def handle_xadd_command(
     command_length -= 1
     orig_entry_id, byte_ptr = decode_bulk_string(byte_ptr)
     command_length -= 1
-    time_id, seqNum_id = xadd_gen_time_and_SeqNum(orig_entry_id, stream_key)
+    time_id, seqNum_id = gen_time_and_SeqNum_from_entry_id(orig_entry_id, stream_key)
     new_entry_id = f"{time_id}-{seqNum_id}"
     print(f"Entry ID: {new_entry_id}")
     if (command_length % 2) != 0:
@@ -462,7 +484,7 @@ async def handle_psync_command(writer: asyncio.StreamWriter, byte_ptr: int) -> i
 async def handle_replconf_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     s, byte_ptr = decode_bulk_string(byte_ptr)
     print(f"matching s in replconf function: {s}")
-    match s:
+    match s.lower():
         case "listening-port":
             _, byte_ptr = decode_bulk_string(byte_ptr)
             if IS_MASTER:
@@ -473,7 +495,7 @@ async def handle_replconf_command(writer: asyncio.StreamWriter, byte_ptr: int) -
             if IS_MASTER:
                 writer.write("+OK\r\n".encode())
                 await writer.drain()
-        case "GETACK":
+        case "getack":
             _, byte_ptr = decode_bulk_string(byte_ptr)
             resp = (
                 f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(str(replica_offset))}"
