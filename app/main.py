@@ -264,26 +264,49 @@ def update_offset(byte_ptr: int) -> None:
         master_repl_offset += byte_ptr
 
 
+def xrange_encode_entry_to_array(entry_id: str, val_dict: dict) -> str:
+    result_str = f"*2\r\n${len(entry_id)}\r\n{entry_id}\r\n"
+    result_str += f"*{len(val_dict)}\r\n"
+    for k, v in val_dict.items():
+        result_str += f"${len(k)}\r\n{k}\r\n"
+        result_str += f"${len(v)}\r\n{v}\r\n"
+    return result_str
+
+
 async def handle_xrange_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     stream_key, byte_ptr = decode_bulk_string(byte_ptr)
     start_id, byte_ptr = decode_bulk_string(byte_ptr)
     end_id, byte_ptr = decode_bulk_string(byte_ptr)
-    entry_ids_in_given_stream = cast(
-        StreamValue, key_store[stream_key]
-    ).entry_dict.keys()
-    start_index = 0
-    for i, v in enumerate(entry_ids_in_given_stream):
-        curr_elem_time, _ = v.split("-")
-        if int(start_id) >= int(curr_elem_time):
-            start_index = i
-            break
+    if "-" in start_id:
+        start_time, start_seqNum = start_id.split("-")
     else:
-        raise ValueError(f"Invalid start entry_id! (Given: {start_id})")
-    end_index = len(entry_ids_in_given_stream) - 1
-    while end_index >= start_index:
-        v = entry_ids_in_given_stream[end_index]
-        curr_elem_time, _ = v.split("-")
-
+        start_time = start_id
+        start_seqNum = None
+    if "-" in end_id:
+        end_time, end_seqNum = end_id.split("-")
+    else:
+        end_time = end_id
+        end_seqNum = None
+    entries_for_stream_key = cast(StreamValue, key_store[stream_key]).entry_dict
+    result_arr = []
+    for k, v in entries_for_stream_key.items():
+        curr_time, curr_seqNum = k.split("-")
+        # If entry id (k) we're currently looking at is in the range
+        # of <start_id> - <end-id>, generate an array representation
+        # of the entry_id and it's associated key-value pairs and
+        # append to result_arr
+        if (
+            start_time <= curr_time
+            and (start_seqNum is None or start_seqNum <= curr_seqNum)
+            and end_time >= start_time
+            and (end_seqNum is None or end_seqNum >= curr_seqNum)
+        ):
+            result_arr.append(xrange_encode_entry_to_array(k, v))
+    print("XRANGE result array (so far):")
+    print(result_arr)
+    final_result = f"*{len(result_arr)}\r\n" + "".join(r for r in result_arr)
+    writer.write(final_result.encode())
+    await writer.drain()
     return byte_ptr
 
 
@@ -658,8 +681,13 @@ def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
         while command_deque[byte_ptr] != "\r":
             str_len += command_deque[byte_ptr]
             byte_ptr += 1
-        # Advanced two more to skip past newline
-        byte_ptr += 2
+        byte_ptr += 1
+        if command_deque[byte_ptr] != "\n":
+            print(
+                f"Expected \\n at index {byte_ptr}, instead found {command_deque[byte_ptr]}"
+            )
+            raise NotEnoughBytesToProcessCommand("decode_bulk_string")
+        byte_ptr += 1
         str_len = int(str_len)
         print(f"Length of bulk string to process = {str_len}")
         start = byte_ptr
@@ -667,6 +695,11 @@ def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
         print(f"Bulk string start ind, end ind: {start}, {end}")
         result_str = "".join(command_deque[c] for c in range(start, end))
         # Skip past "\r\n" after end of string-contents
+        end_of_bulk_string = f"{command_deque[end]}{command_deque[end + 1]}"
+        if end_of_bulk_string != "\r\n":
+            print(
+                f"Expected \\r\\n at end of bulk string, instead got {end_of_bulk_string}"
+            )
         byte_ptr = end + 2
         return (result_str, byte_ptr)
     except IndexError:
@@ -727,6 +760,8 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
         for _ in range(byte_ptr):
+            if not command_deque:
+                break
             command_deque.popleft()
         update_offset(byte_ptr)
         byte_ptr = 0
