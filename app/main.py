@@ -264,19 +264,45 @@ def update_offset(byte_ptr: int) -> None:
         master_repl_offset += byte_ptr
 
 
-def xrange_encode_entry_to_array(entry_id: str, val_dict: dict) -> str:
-    result_str = f"*2\r\n${len(entry_id)}\r\n{entry_id}\r\n"
-    result_str += f"*{len(val_dict)}\r\n"
-    for k, v in val_dict.items():
-        result_str += f"${len(k)}\r\n{k}\r\n"
-        result_str += f"${len(v)}\r\n{v}\r\n"
-    return result_str
+def xrange_retrieve_entries_without_explicit_end(
+    start_id: str, stream_key: str
+) -> list[str]:
+    if "-" in start_id:
+        start_time, start_seqNum = start_id.split("-")
+    else:
+        start_time = start_id
+        start_seqNum = None
+    entries_for_stream_key = cast(StreamValue, key_store[stream_key]).entry_dict
+    result_arr = []
+    for k, v in entries_for_stream_key.items():
+        curr_time, curr_seqNum = k.split("-")
+        if start_time <= curr_time and (
+            start_seqNum is None or start_seqNum <= curr_seqNum
+        ):
+            result_arr.append(xrange_encode_entry_to_array(k, v))
+    return result_arr
 
 
-async def handle_xrange_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
-    stream_key, byte_ptr = decode_bulk_string(byte_ptr)
-    start_id, byte_ptr = decode_bulk_string(byte_ptr)
-    end_id, byte_ptr = decode_bulk_string(byte_ptr)
+def xrange_retrieve_entries_without_explicit_start(
+    end_id: str, stream_key: str
+) -> list[str]:
+    if "-" in end_id:
+        end_time, end_seqNum = end_id.split("-")
+    else:
+        end_time = end_id
+        end_seqNum = None
+    entries_for_stream_key = cast(StreamValue, key_store[stream_key]).entry_dict
+    result_arr = []
+    for k, v in entries_for_stream_key.items():
+        curr_time, curr_seqNum = k.split("-")
+        if end_time >= curr_time and (end_seqNum is None or end_seqNum >= curr_seqNum):
+            result_arr.append(xrange_encode_entry_to_array(k, v))
+    return result_arr
+
+
+def xrange_retrieve_entries_with_explicit_start_and_stop(
+    start_id: str, end_id: str, stream_key: str
+) -> list[str]:
     if "-" in start_id:
         start_time, start_seqNum = start_id.split("-")
     else:
@@ -302,6 +328,30 @@ async def handle_xrange_command(writer: asyncio.StreamWriter, byte_ptr: int) -> 
             and (end_seqNum is None or end_seqNum >= curr_seqNum)
         ):
             result_arr.append(xrange_encode_entry_to_array(k, v))
+    return result_arr
+
+
+def xrange_encode_entry_to_array(entry_id: str, val_dict: dict) -> str:
+    result_str = f"*2\r\n${len(entry_id)}\r\n{entry_id}\r\n"
+    result_str += f"*{len(val_dict)}\r\n"
+    for k, v in val_dict.items():
+        result_str += f"${len(k)}\r\n{k}\r\n"
+        result_str += f"${len(v)}\r\n{v}\r\n"
+    return result_str
+
+
+async def handle_xrange_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    stream_key, byte_ptr = decode_bulk_string(byte_ptr)
+    start_id, byte_ptr = decode_bulk_string(byte_ptr)
+    end_id, byte_ptr = decode_bulk_string(byte_ptr)
+    if start_id == "-":
+        result_arr = xrange_retrieve_entries_without_explicit_start(end_id, stream_key)
+    elif end_id == "+":
+        result_arr = xrange_retrieve_entries_without_explicit_end(start_id, stream_key)
+    else:
+        result_arr = xrange_retrieve_entries_with_explicit_start_and_stop(
+            start_id, end_id, stream_key
+        )
     print("XRANGE result array (so far):")
     print(result_arr)
     final_result = f"*{len(result_arr)}\r\n" + "".join(r for r in result_arr)
