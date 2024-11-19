@@ -6,6 +6,7 @@ import argparse
 import random
 import string
 import re
+import copy
 
 
 command_deque: deque[str] = deque()
@@ -271,7 +272,8 @@ def xread_retrieve_entries(stream_key: str, greater_than_id: str) -> str:
         curr_time, curr_seqNum = k.split("-")
         if curr_time >= gt_time and curr_seqNum > gt_seqNum:
             result_arr.append(encode_entry_to_array(k, v))
-
+    if not result_arr:
+        return "$-1\r\n"
     final_result = (
         f"*2\r\n${len(stream_key)}\r\n{stream_key}\r\n*{len(result_arr)}\r\n"
         + "".join(s for s in result_arr)
@@ -282,6 +284,16 @@ def xread_retrieve_entries(stream_key: str, greater_than_id: str) -> str:
 async def handle_xread_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     regex_for_entry_id = re.compile(r"\d+-\d+")
     s, byte_ptr = decode_bulk_string(byte_ptr)
+    blocked_command_queue = None
+    if s == "block":
+        global command_deque
+        block_time_ms, byte_ptr = decode_bulk_string(byte_ptr)
+        blocked_command_queue = copy.deepcopy(command_deque)
+        command_deque.clear()
+        print(f"Blocking for {block_time_ms} ms")
+        await asyncio.sleep(int(block_time_ms) / 1000)
+        command_deque.extend(blocked_command_queue)
+        s, byte_ptr = decode_bulk_string(byte_ptr)
     if s != "streams":
         raise ValueError(
             f"'XREAD' should be followed by 'streams'. Instead, it's followed by {s}"
