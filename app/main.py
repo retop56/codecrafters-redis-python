@@ -285,14 +285,10 @@ async def handle_xread_command(writer: asyncio.StreamWriter, byte_ptr: int) -> i
     regex_for_entry_id = re.compile(r"\d+-\d+")
     s, byte_ptr = decode_bulk_string(byte_ptr)
     blocked_command_queue = None
+    block_time_ms = None
     if s == "block":
         global command_deque
         block_time_ms, byte_ptr = decode_bulk_string(byte_ptr)
-        blocked_command_queue = copy.deepcopy(command_deque)
-        command_deque.clear()
-        print(f"Blocking for {block_time_ms} ms")
-        await asyncio.sleep(int(block_time_ms) / 1000)
-        command_deque.extend(blocked_command_queue)
         s, byte_ptr = decode_bulk_string(byte_ptr)
     if s != "streams":
         raise ValueError(
@@ -309,6 +305,28 @@ async def handle_xread_command(writer: asyncio.StreamWriter, byte_ptr: int) -> i
     for i in range(1, len(stream_keys_and_ids)):
         entry_id, byte_ptr = decode_bulk_string(byte_ptr)
         stream_keys_and_ids[i] = (*stream_keys_and_ids[i], entry_id)
+    if block_time_ms == "0":
+        blocked_command_queue = copy.deepcopy(command_deque)
+        command_deque.clear()
+        # Check if stream_key even exists in key_store. If it doesn't, wait until
+        # entry is created under stream name. If it does, wait until another entry
+        # is entry is added under stream name.
+        for stream_key, _ in stream_keys_and_ids:
+            if stream_key in key_store:
+                curr_stream_val = cast(StreamValue, key_store[stream_key])
+                curr_len = len(curr_stream_val.entry_dict)
+                while True:
+                    if len(curr_stream_val.entry_dict) > curr_len:
+                        break
+                    else:
+                        await asyncio.sleep(0)
+        command_deque.extend(blocked_command_queue)
+    elif block_time_ms:
+        blocked_command_queue = copy.deepcopy(command_deque)
+        command_deque.clear()
+        print(f"Blocking for {block_time_ms} ms")
+        await asyncio.sleep(int(block_time_ms) / 1000)
+        command_deque.extend(blocked_command_queue)
     result_arr = []
     for e in stream_keys_and_ids:
         result_arr.append(xread_retrieve_entries(*e))
