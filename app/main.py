@@ -6,8 +6,6 @@ import argparse
 import random
 import string
 
-# from enum import Enum
-
 
 command_deque: deque[str] = deque()
 # key_store: dict[str, tuple[str, Optional[float]]] = {}
@@ -264,6 +262,36 @@ def update_offset(byte_ptr: int) -> None:
         master_repl_offset += byte_ptr
 
 
+def xread_retrieve_entries(greater_than_id: str, stream_key: str) -> list[str]:
+    gt_time, gt_seqNum = greater_than_id.split("-")
+    entries_for_stream_key = cast(StreamValue, key_store[stream_key]).entry_dict
+    result_arr = []
+    for k, v in entries_for_stream_key.items():
+        curr_time, curr_seqNum = k.split("-")
+        if curr_time >= gt_time and curr_seqNum > gt_seqNum:
+            result_arr.append(encode_entry_to_array(k, v))
+
+    return result_arr
+
+
+async def handle_xread_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    s, byte_ptr = decode_bulk_string(byte_ptr)
+    if s != "streams":
+        raise ValueError(
+            f"'XREAD' should be followed by 'streams'. Instead, it's followed by {s}"
+        )
+    stream_key, byte_ptr = decode_bulk_string(byte_ptr)
+    greater_than_id, byte_ptr = decode_bulk_string(byte_ptr)
+    result_arr = xread_retrieve_entries(greater_than_id, stream_key)
+    result_str = (
+        f"*1\r\n*2\r\n${len(stream_key)}\r\n{stream_key}\r\n*{len(result_arr)}\r\n"
+        + "".join(s for s in result_arr)
+    )
+    writer.write(result_str.encode())
+    await writer.drain()
+    return byte_ptr
+
+
 def xrange_retrieve_entries_without_explicit_end(
     start_id: str, stream_key: str
 ) -> list[str]:
@@ -279,7 +307,7 @@ def xrange_retrieve_entries_without_explicit_end(
         if start_time <= curr_time and (
             start_seqNum is None or start_seqNum <= curr_seqNum
         ):
-            result_arr.append(xrange_encode_entry_to_array(k, v))
+            result_arr.append(encode_entry_to_array(k, v))
     return result_arr
 
 
@@ -296,7 +324,7 @@ def xrange_retrieve_entries_without_explicit_start(
     for k, v in entries_for_stream_key.items():
         curr_time, curr_seqNum = k.split("-")
         if end_time >= curr_time and (end_seqNum is None or end_seqNum >= curr_seqNum):
-            result_arr.append(xrange_encode_entry_to_array(k, v))
+            result_arr.append(encode_entry_to_array(k, v))
     return result_arr
 
 
@@ -327,11 +355,11 @@ def xrange_retrieve_entries_with_explicit_start_and_stop(
             and end_time >= start_time
             and (end_seqNum is None or end_seqNum >= curr_seqNum)
         ):
-            result_arr.append(xrange_encode_entry_to_array(k, v))
+            result_arr.append(encode_entry_to_array(k, v))
     return result_arr
 
 
-def xrange_encode_entry_to_array(entry_id: str, val_dict: dict) -> str:
+def encode_entry_to_array(entry_id: str, val_dict: dict) -> str:
     result_str = f"*2\r\n${len(entry_id)}\r\n{entry_id}\r\n"
     result_str += f"*{len(val_dict)}\r\n"
     for k, v in val_dict.items():
@@ -807,6 +835,8 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
                 byte_ptr = await handle_xadd_command(writer, byte_ptr, arr_length - 1)
             case "xrange":
                 byte_ptr = await handle_xrange_command(writer, byte_ptr)
+            case "xread":
+                byte_ptr = await handle_xread_command(writer, byte_ptr)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
         for _ in range(byte_ptr):
