@@ -266,38 +266,11 @@ def update_offset(byte_ptr: int) -> None:
 
 async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     regex_for_entry_id = re.compile(r"\d+-\d+")
+    block_time_ms, byte_ptr = decode_bulk_string(byte_ptr)
     s, byte_ptr = decode_bulk_string(byte_ptr)
-    return byte_ptr
-
-
-def xread_retrieve_entries(stream_key: str, greater_than_id: str) -> str:
-    gt_time, gt_seqNum = greater_than_id.split("-")
-    entries_for_stream_key = cast(StreamValue, key_store[stream_key]).entry_dict
-    result_arr = []
-    for k, v in entries_for_stream_key.items():
-        curr_time, curr_seqNum = k.split("-")
-        if curr_time >= gt_time and curr_seqNum > gt_seqNum:
-            result_arr.append(encode_entry_to_array(k, v))
-    if not result_arr:
-        return "$-1\r\n"
-    final_result = (
-        f"*2\r\n${len(stream_key)}\r\n{stream_key}\r\n*{len(result_arr)}\r\n"
-        + "".join(s for s in result_arr)
-    )
-    return final_result
-
-
-async def handle_xread_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
-    regex_for_entry_id = re.compile(r"\d+-\d+")
-    s, byte_ptr = decode_bulk_string(byte_ptr)
-    blocked_command_queue = None
-    block_time_ms = None
-    if s == "block":
-        block_time_ms, byte_ptr = decode_bulk_string(byte_ptr)
-        s, byte_ptr = decode_bulk_string(byte_ptr)
     if s != "streams":
         raise ValueError(
-            f"'XREAD' should be followed by 'streams'. Instead, it's followed by {s}"
+            f"block time should be followed by 'streams'. Instead, it's followed by {s}"
         )
     stream_keys_and_ids = []
     while True:
@@ -326,12 +299,58 @@ async def handle_xread_command(writer: asyncio.StreamWriter, byte_ptr: int) -> i
                     else:
                         await asyncio.sleep(0)
         command_deque.extend(blocked_command_queue)
-    elif block_time_ms:
+    else:
         blocked_command_queue = copy.deepcopy(command_deque)
         command_deque.clear()
         print(f"Blocking for {block_time_ms} ms")
         await asyncio.sleep(int(block_time_ms) / 1000)
         command_deque.extend(blocked_command_queue)
+    result_arr = []
+    for e in stream_keys_and_ids:
+        result_arr.append(xread_retrieve_entries(*e))
+    result_str = f"*{len(stream_keys_and_ids)}\r\n" + "".join(s for s in result_arr)
+    writer.write(result_str.encode())
+    await writer.drain()
+    return byte_ptr
+
+
+def xread_retrieve_entries(stream_key: str, greater_than_id: str) -> str:
+    gt_time, gt_seqNum = greater_than_id.split("-")
+    entries_for_stream_key = cast(StreamValue, key_store[stream_key]).entry_dict
+    result_arr = []
+    for k, v in entries_for_stream_key.items():
+        curr_time, curr_seqNum = k.split("-")
+        if curr_time >= gt_time and curr_seqNum > gt_seqNum:
+            result_arr.append(encode_entry_to_array(k, v))
+    if not result_arr:
+        return "$-1\r\n"
+    final_result = (
+        f"*2\r\n${len(stream_key)}\r\n{stream_key}\r\n*{len(result_arr)}\r\n"
+        + "".join(s for s in result_arr)
+    )
+    return final_result
+
+
+async def handle_xread_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    regex_for_entry_id = re.compile(r"\d+-\d+")
+    s, byte_ptr = decode_bulk_string(byte_ptr)
+    if s == "block":
+        return await xread_w_blocking(writer, byte_ptr)
+    if s != "streams":
+        raise ValueError(
+            f"'XREAD' should be followed by 'streams'. Instead, it's followed by {s}"
+        )
+    stream_keys_and_ids = []
+    while True:
+        possible_stream_key, byte_ptr = decode_bulk_string(byte_ptr)
+        if regex_for_entry_id.fullmatch(possible_stream_key):
+            stream_keys_and_ids[0] = (*stream_keys_and_ids[0], possible_stream_key)
+            break
+        else:
+            stream_keys_and_ids.append((possible_stream_key,))
+    for i in range(1, len(stream_keys_and_ids)):
+        entry_id, byte_ptr = decode_bulk_string(byte_ptr)
+        stream_keys_and_ids[i] = (*stream_keys_and_ids[i], entry_id)
     result_arr = []
     for e in stream_keys_and_ids:
         result_arr.append(xread_retrieve_entries(*e))
