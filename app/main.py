@@ -264,6 +264,12 @@ def update_offset(byte_ptr: int) -> None:
         master_repl_offset += byte_ptr
 
 
+async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    regex_for_entry_id = re.compile(r"\d+-\d+")
+    s, byte_ptr = decode_bulk_string(byte_ptr)
+    return byte_ptr
+
+
 def xread_retrieve_entries(stream_key: str, greater_than_id: str) -> str:
     gt_time, gt_seqNum = greater_than_id.split("-")
     entries_for_stream_key = cast(StreamValue, key_store[stream_key]).entry_dict
@@ -287,7 +293,6 @@ async def handle_xread_command(writer: asyncio.StreamWriter, byte_ptr: int) -> i
     blocked_command_queue = None
     block_time_ms = None
     if s == "block":
-        global command_deque
         block_time_ms, byte_ptr = decode_bulk_string(byte_ptr)
         s, byte_ptr = decode_bulk_string(byte_ptr)
     if s != "streams":
