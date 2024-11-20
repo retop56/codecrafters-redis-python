@@ -275,7 +275,10 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     stream_keys_and_ids = []
     while True:
         possible_stream_key, byte_ptr = decode_bulk_string(byte_ptr)
-        if regex_for_entry_id.fullmatch(possible_stream_key):
+        if (
+            regex_for_entry_id.fullmatch(possible_stream_key)
+            or possible_stream_key == "$"
+        ):
             stream_keys_and_ids[0] = (*stream_keys_and_ids[0], possible_stream_key)
             break
         else:
@@ -289,7 +292,7 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
         # Check if stream_key even exists in key_store. If it doesn't, wait until
         # entry is created under stream name. If it does, wait until another entry
         # is entry is added under stream name.
-        for stream_key, _ in stream_keys_and_ids:
+        for stream_key, id in stream_keys_and_ids:
             if stream_key in key_store:
                 curr_stream_val = cast(StreamValue, key_store[stream_key])
                 curr_len = len(curr_stream_val.entry_dict)
@@ -298,6 +301,9 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
                         break
                     else:
                         await asyncio.sleep(0)
+            else:
+                while stream_key not in key_store:
+                    await asyncio.sleep(0)
         command_deque.extend(blocked_command_queue)
     else:
         blocked_command_queue = copy.deepcopy(command_deque)
