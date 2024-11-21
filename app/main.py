@@ -264,49 +264,6 @@ def update_offset(byte_ptr: int) -> None:
         master_repl_offset += byte_ptr
 
 
-# async def xread_new_entries_only(
-#     writer: asyncio.StreamWriter,
-#     byte_ptr: int,
-#     stream_keys: list,
-#     block_time_ms: str,
-# ) -> int:
-
-#     # Capture current length of stream_key entries in key-store
-#     for i, s in enumerate(stream_keys):
-#         curr_stream_val = cast(StreamValue, key_store[s[0]])
-#         stream_keys[i] = (s[0], len(curr_stream_val.entry_dict))
-#     result_arr = []
-#     # If <block_time_ms> is zero, wait until a change has occurred before responding
-#     if block_time_ms == "0":
-#         blocked_command_queue = copy.deepcopy(command_deque)
-#         command_deque.clear()
-#         while True:
-#             for curr_key, prev_len in stream_keys:
-#                 curr_key_entry_dict = cast(StreamValue, key_store[curr_key]).entry_dict
-#                 if len(curr_key_entry_dict) > prev_len:
-#                     break
-#             else:
-#                 await asyncio.sleep(0)
-#                 continue
-#             break
-#         command_deque.extend(blocked_command_queue)
-#         # Find entries that are greater than amount listed in stream_keys
-#         for curr_key, prev_len in stream_keys:
-#             curr_key_entry_dict = cast(StreamValue, key_store[curr_key]).entry_dict
-#             if len(curr_key_entry_dict) > prev_len:
-#                 pass
-#             else:
-#                 pass
-#     # Block for <block_time_ms> amount of time and
-#     else:
-#         blocked_command_queue = copy.deepcopy(command_deque)
-#         command_deque.clear()
-#         await asyncio.sleep(int(block_time_ms) / 1000)
-#         command_deque.extend(blocked_command_queue)
-
-#     return byte_ptr
-
-
 async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     regex_for_entry_id = re.compile(r"\d+-\d+")
     block_time_ms, byte_ptr = decode_bulk_string(byte_ptr)
@@ -391,10 +348,20 @@ def xread_retrieve_entries(
             raise ValueError(
                 "If start_id is '$', previous length of key should be provided!"
             )
-        entries_for_stream_key = cast(StreamValue, key_store[stream_key]).entry_dict
+        entries_for_stream_key = list(
+            cast(StreamValue, key_store[stream_key]).entry_dict.items()
+        )
         result_arr = []
-
-        return ""
+        for i in range(prev_len, len(entries_for_stream_key)):
+            k, v = entries_for_stream_key[i]
+            result_arr.append(encode_entry_to_array(k, v))
+        if not result_arr:
+            return "$-1\r\n"
+        final_result = (
+            f"*2\r\n${len(stream_key)}\r\n{stream_key}\r\n*{len(result_arr)}\r\n"
+            + "".join(s for s in result_arr)
+        )
+        return final_result
 
 
 async def handle_xread_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
