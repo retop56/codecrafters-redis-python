@@ -264,6 +264,19 @@ def update_offset(byte_ptr: int) -> None:
         master_repl_offset += byte_ptr
 
 
+async def handle_incr_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+    key_to_incr, byte_ptr = decode_bulk_string(byte_ptr)
+    val = key_store[key_to_incr]
+    match val:
+        case StringValue():
+            val.str_val = str(int(val.str_val) + 1)
+            writer.write(f":{val.str_val}\r\n".encode())
+            await writer.drain()
+        case _:
+            raise TypeError(f"Cannot increment value of type '{type(val).__name__}'")
+    return byte_ptr
+
+
 async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     regex_for_entry_id = re.compile(r"\d+-\d+")
     block_time_ms, byte_ptr = decode_bulk_string(byte_ptr)
@@ -938,6 +951,8 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
                 byte_ptr = await handle_xrange_command(writer, byte_ptr)
             case "xread":
                 byte_ptr = await handle_xread_command(writer, byte_ptr)
+            case "incr":
+                byte_ptr = await handle_incr_command(writer, byte_ptr)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
         for _ in range(byte_ptr):
