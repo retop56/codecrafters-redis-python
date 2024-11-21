@@ -276,24 +276,23 @@ def update_offset(byte_ptr: int) -> None:
 
 async def handle_incr_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     key_to_incr, byte_ptr = decode_bulk_string(byte_ptr)
-    val = key_store.get(key_to_incr)
-    match val:
+    val_belonging_to_key = key_store.get(key_to_incr)
+    match val_belonging_to_key:
         case StringValue():
-            if val.val.isdigit():
-                val.val = str(int(val.val) + 1)
-                writer.write(f":{val.val}\r\n".encode())
-                await writer.drain()
-            else:
-                writer.write(
-                    "-ERR value is not an integer or out of range\r\n".encode()
-                )
-                await writer.drain()
+            writer.write("-ERR value is not an integer or out of range\r\n".encode())
+            await writer.drain()
+        case NumValue():
+            val_belonging_to_key.val += 1
+            writer.write(f":{val_belonging_to_key.val}\r\n".encode())
+            await writer.drain()
         case None:
-            key_store[key_to_incr] = StringValue(val="1", expiry=None)
+            key_store[key_to_incr] = NumValue(val=1, expiry=None)
             writer.write(":1\r\n".encode())
             await writer.drain()
         case _:
-            raise TypeError(f"Cannot increment value of type '{type(val).__name__}'")
+            raise TypeError(
+                f"Cannot increment value of type '{type(val_belonging_to_key).__name__}'"
+            )
     return byte_ptr
 
 
@@ -816,7 +815,7 @@ async def handle_get_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int
         return byte_ptr
     entry = key_store[key]
     match entry:
-        case StringValue():
+        case StringValue() | NumValue():
             if entry.expiry is None:
                 writer.write(entry.str_repr_of_val().encode())
                 await writer.drain()
@@ -849,7 +848,10 @@ async def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int
             expiry_time = None
     except (NotEnoughBytesToProcessCommand, ValueError):
         expiry_time = None
-    entry_val = StringValue(val=val, expiry=expiry_time)
+    if val.isdigit():
+        entry_val = NumValue(val=int(val), expiry=expiry_time)
+    else:
+        entry_val = StringValue(val=val, expiry=expiry_time)
     key_store[key] = entry_val
     print(f"Set {key} --> {repr(entry_val)}")
     if IS_MASTER:
