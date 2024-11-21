@@ -98,6 +98,7 @@ else:
     )
     master_repl_offset = 0
 bytes_received = 0
+IN_MULTI_MODE = False
 
 
 def rdb_file_process_expiry(f: BinaryIO, bytes_to_read: int) -> tuple[float, BinaryIO]:
@@ -272,6 +273,12 @@ def update_offset(byte_ptr: int) -> None:
     else:
         global master_repl_offset
         master_repl_offset += byte_ptr
+
+
+async def handle_exec_command(writer: asyncio.StreamWriter) -> None:
+    if IN_MULTI_MODE is False:
+        writer.write("-ERR EXEC without MULTI\r\n".encode())
+        await writer.drain()
 
 
 async def handle_multi_command(writer: asyncio.StreamWriter) -> None:
@@ -982,6 +989,8 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
                 byte_ptr = await handle_incr_command(writer, byte_ptr)
             case "multi":
                 await handle_multi_command(writer)
+            case "exec":
+                await handle_exec_command(writer)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
         for _ in range(byte_ptr):
