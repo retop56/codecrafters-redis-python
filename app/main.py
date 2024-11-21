@@ -1005,12 +1005,11 @@ async def multi_mode_handler(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> None:
     while True:
-        # exec_command = r"\*\d+\\r\\n\$\d+\\r\\nEXEC\\r\\n
-        regex = r"\*\d+\r\n\$\d+\r\nEXEC\r\n"
-        exec_regex = re.compile(regex)
+        exec_regex_str = r"\*\d+\r\n\$\d+\r\nEXEC\r\n"
+        compiled_exec_regex = re.compile(exec_regex_str)
         global queued_commands
         queued_commands_string = "".join(queued_commands)
-        pattern_match = exec_regex.match(queued_commands_string)
+        pattern_match = compiled_exec_regex.match(queued_commands_string)
         if pattern_match:
             start_of_match, end_of_match = pattern_match.span()
             stuff_to_add = (
@@ -1022,41 +1021,11 @@ async def multi_mode_handler(
             queued_commands.clear()
             await handle_exec_command(writer)
             return
-
-    # First check if complete exec command is in data we just got. If it is, slice
-    # that out of the data, call <handle_exec_command>, and then append the rest
-    # and go from there
-    # while True:
-    #     exec_command = r"\*\d+\\r\\n\$\d+\\r\\nEXEC\\r\\n"
-    #     exec_regex = re.compile(exec_command)
-    #     pattern_match = exec_regex.match(data)
-    #     if pattern_match:
-    #         start_of_match, end_of_match = pattern_match.span()
-    #         new_data = data[:start_of_match] + data[end_of_match:]
-    #         await handle_exec_command(writer)
-    #         global commands, queued_commands
-    #         commands.extend(queued_commands)
-    #         queued_commands.clear()
-    #         commands.extend(new_data)
-    #         global IN_MULTI_MODE
-    #         IN_MULTI_MODE = False
-    #         return
-    #     # Continue reading in data, appending to <queued_commands>, and
-    #     # searching for full exec command
-    #     while True:
-    #         new_data = await reader.read(100)
-    #         queued_commands.extend(new_data.decode())
-    #         if len(queued_commands) < len(exec_command):
-    #             continue
-    #         for i in range(0, len(queued_commands) - len(exec_command)):
-    #             window = "".join(
-    #                 itertools.islice(queued_commands, i, i + len(exec_command))
-    #             )
-    #             if window == exec_command:
-    #                 for k in range(i, i + len(exec_command)):
-    #                     del queued_commands[k]
-    #                 commands.extend(queued_commands)
-    #                 return
+        else:
+            data = await reader.read(100)
+            command_regex_str = (
+                r"\*\d+\r\n\$\d+\r\n[PING|ECHO|SET|GET|CONFIG|KEYS|INFO|REPLCONF|]"
+            )
 
 
 async def decode_array(
