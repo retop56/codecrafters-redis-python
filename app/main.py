@@ -1,5 +1,6 @@
 import asyncio
 from collections import deque
+from collections.abc import Callable, Coroutine
 import time
 from typing import Optional, BinaryIO, cast
 import argparse
@@ -8,9 +9,21 @@ import string
 import re
 import copy
 
+parser = argparse.ArgumentParser(
+    prog="Bootleg Redis",
+    description="'Build your own Redis' Codecrafters challenge",
+)
+parser.add_argument("--dir")
+parser.add_argument("--dbfilename")
+parser.add_argument("--port", type=int, default=6379)
+parser.add_argument("--replicaof")
+args = parser.parse_args()
 
-commands: deque[str] = deque()
-queued_commands: deque[str] = deque()
+
+b_stream: deque[str] = deque()
+commands: deque["Command"] = deque()
+multi_commands: deque["Command"] = deque()
+queued_responses: list[str] = []
 # key_store: dict[str, tuple[str, Optional[float]]] = {}
 # """key --> (value, expiry)"""
 key_store: dict[str, "HashValue"] = {}
@@ -22,6 +35,16 @@ empty_rdb_file_hex = bytes.fromhex(
     "41000fa08616f662d62617365c000fff06e3bfec0ff"
     "5aa2"
 )
+
+
+class Command:
+    def __init__(
+        self,
+        cb: Callable[["Command", asyncio.StreamWriter], Coroutine],
+        args: Optional[dict] = None,
+    ) -> None:
+        self.args = args
+        self.cb = cb
 
 
 class HashValue:
@@ -77,16 +100,6 @@ class StreamValue(HashValue):
 class NotEnoughBytesToProcessCommand(Exception):
     pass
 
-
-parser = argparse.ArgumentParser(
-    prog="Bootleg Redis",
-    description="'Build your own Redis' Codecrafters challenge",
-)
-parser.add_argument("--dir")
-parser.add_argument("--dbfilename")
-parser.add_argument("--port", type=int, default=6379)
-parser.add_argument("--replicaof")
-args = parser.parse_args()
 
 if args.replicaof:
     IS_MASTER = False
@@ -260,11 +273,30 @@ def read_rdb_file_from_disk():
         return
 
 
+async def execute_echo_command(c: Command, writer: asyncio.StreamWriter) -> None:
+    if not c.args:
+        raise ValueError("Echo command should have an args dictionary in it!")
+    echo_msg = c.args["echo_msg"]
+    writer.write(f"${len(echo_msg)}\r\n{echo_msg}\r\n".encode())
+    await writer.drain()
+
+
+async def execute_ping_command(c: Command, writer: asyncio.StreamWriter) -> None:
+    if IN_MULTI_MODE:
+        multi_commands.append(c)
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return
+    writer.write("+PONG\r\n".encode())
+    await writer.drain()
+    return
+
+
 def clear_bad_command(byte_ptr: int) -> int:
     for _ in range(byte_ptr):
-        commands.popleft()
-    while commands and commands[0] != "*":
-        commands.popleft()
+        b_stream.popleft()
+    while b_stream and b_stream[0] != "*":
+        b_stream.popleft()
     return 0
 
 
@@ -291,24 +323,27 @@ async def handle_exec_command(writer: asyncio.StreamWriter) -> None:
 async def handle_multi_command(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter, byte_ptr: int
 ) -> int:
-    global IN_MULTI_MODE
-    if IN_MULTI_MODE is False:
-        IN_MULTI_MODE = True
-        writer.write("+OK\r\n".encode())
-        await writer.drain()
-        # Clear out 'multi' command from command deque
-        global commands
-        for _ in range(byte_ptr):
-            if not commands:
-                break
-            commands.popleft()
-        # Add anything else after 'multi' command to <queued_commands>
-        queued_commands.extend(commands)
-        commands.clear()
-        await multi_mode_handler(reader, writer)
-        update_offset(byte_ptr)
-        return 0
-    raise ValueError("Already in 'multi' mode!")
+    # print("Handling 'multi' command")
+    # global IN_MULTI_MODE
+    # if IN_MULTI_MODE is False:
+    #     IN_MULTI_MODE = True
+    #     writer.write("+OK\r\n".encode())
+    #     await writer.drain()
+    #     # Clear out 'multi' command from command deque
+    #     global b_stream
+    #     for _ in range(byte_ptr):
+    #         if not b_stream:
+    #             break
+    #         b_stream.popleft()
+    #     # Add anything else after 'multi' command to <queued_commands>
+    #     multi_commands.extend(b_stream)
+    #     b_stream.clear()
+    #     # await multi_mode_handler(reader, writer)
+    #     update_offset(byte_ptr)
+    return 0
+
+
+# raise ValueError("Already in 'multi' mode!")
 
 
 async def handle_incr_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
@@ -366,8 +401,8 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
         await writer.drain()
         return byte_ptr
     if block_time_ms == "0":
-        blocked_command_queue = copy.deepcopy(commands)
-        commands.clear()
+        blocked_command_queue = copy.deepcopy(b_stream)
+        b_stream.clear()
         # Check if stream_key even exists in key_store. If it doesn't, wait until
         # entry is created under stream name. If it does, wait until another entry
         # is entry is added under stream name.
@@ -388,13 +423,13 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
                     await asyncio.sleep(0)
                 if id == "$":
                     stream_keys_and_ids[i] = (stream_key, id, 0)
-        commands.extend(blocked_command_queue)
+        b_stream.extend(blocked_command_queue)
     else:
-        blocked_command_queue = copy.deepcopy(commands)
-        commands.clear()
+        blocked_command_queue = copy.deepcopy(b_stream)
+        b_stream.clear()
         print(f"Blocking for {block_time_ms} ms")
         await asyncio.sleep(int(block_time_ms) / 1000)
-        commands.extend(blocked_command_queue)
+        b_stream.extend(blocked_command_queue)
     result_arr = []
     for e in stream_keys_and_ids:
         result_arr.append(xread_retrieve_entries(*e))
@@ -941,31 +976,26 @@ async def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int
 
 async def handle_echo_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     print(f"Byte_ptr position when entering echo command: {byte_ptr}")
-    c, byte_ptr = decode_bulk_string(byte_ptr)
-    global IN_MULTI_MODE
+    response, byte_ptr = decode_bulk_string(byte_ptr)
+    c = Command(cb=execute_echo_command, args={"echo_msg": response})
     if IN_MULTI_MODE:
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
+        multi_commands.append(c)
         return byte_ptr
-    writer.write(f"${len(c)}\r\n{c}\r\n".encode())
-    await writer.drain()
+    commands.append(c)
     return byte_ptr
 
 
-async def handle_pong_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
-    global IN_MULTI_MODE
+async def handle_pong_command() -> None:
+    c = Command(cb=execute_ping_command)
     if IN_MULTI_MODE:
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
-    elif IS_MASTER:
-        writer.write("+PONG\r\n".encode())
-        await writer.drain()
-    return byte_ptr
+        multi_commands.append(c)
+        return
+    commands.append(c)
 
 
 def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
     try:
-        if commands[byte_ptr] != "$":
+        if b_stream[byte_ptr] != "$":
             raise ValueError(
                 f"Expected '$' before length of bulk string. "
                 f"Instead, got {commands[byte_ptr]}"
@@ -973,11 +1003,11 @@ def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
         # Skip past "$"
         byte_ptr += 1
         str_len = ""
-        while commands[byte_ptr] != "\r":
-            str_len += commands[byte_ptr]
+        while b_stream[byte_ptr] != "\r":
+            str_len += b_stream[byte_ptr]
             byte_ptr += 1
         byte_ptr += 1
-        if commands[byte_ptr] != "\n":
+        if b_stream[byte_ptr] != "\n":
             print(
                 f"Expected \\n at index {byte_ptr}, instead found {commands[byte_ptr]}"
             )
@@ -988,9 +1018,9 @@ def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
         start = byte_ptr
         end = byte_ptr + str_len
         print(f"Bulk string start ind, end ind: {start}, {end}")
-        result_str = "".join(commands[c] for c in range(start, end))
+        result_str = "".join(b_stream[c] for c in range(start, end))
         # Skip past "\r\n" after end of string-contents
-        end_of_bulk_string = f"{commands[end]}{commands[end + 1]}"
+        end_of_bulk_string = f"{b_stream[end]}{b_stream[end + 1]}"
         if end_of_bulk_string != "\r\n":
             print(
                 f"Expected \\r\\n at end of bulk string, instead got {end_of_bulk_string}"
@@ -1001,60 +1031,46 @@ def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
         raise NotEnoughBytesToProcessCommand("decode_bulk_string")
 
 
-async def multi_mode_handler(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-) -> None:
-    while True:
-        exec_regex_str = r"\*\d+\r\n\$\d+\r\nEXEC\r\n"
-        compiled_exec_regex = re.compile(exec_regex_str)
-        global queued_commands
-        queued_commands_string = "".join(queued_commands)
-        pattern_match = compiled_exec_regex.match(queued_commands_string)
-        if pattern_match:
-            start_of_match, end_of_match = pattern_match.span()
-            stuff_to_add = (
-                queued_commands_string[:start_of_match]
-                + queued_commands_string[:end_of_match]
-            )
-            global commands
-            commands.extend(stuff_to_add)
-            queued_commands.clear()
-            await handle_exec_command(writer)
-            return
-        else:
-            data = await reader.read(100)
-            command_regex_str = (
-                r"\*\d+\r\n\$\d+\r\n[PING|ECHO|SET|GET|CONFIG|KEYS|INFO|REPLCONF|]"
-            )
+# async def multi_mode_handler(
+#     reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+# ) -> None:
+#     print("Inside multi-mode handler")
+#     byte_ptr = 0
+#     while True:
+#         data = await reader.read(100)
+#         global multi_commands
+#         multi_commands.extend(data.decode())
+#         s, byte_ptr = decode_bulk_string(byte_ptr, multi_mode=True)
+#         if multi_commands[byte_ptr] != "*":
 
 
 async def decode_array(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> None:
     byte_ptr = 0
-    while commands:
-        if commands[byte_ptr] != "*":
+    while b_stream:
+        if b_stream[byte_ptr] != "*":
             raise ValueError(
                 f"Array is supposed to start with '*' "
                 f"(Current byte_ptr = {byte_ptr}, "
-                f"current char at byte_ptr = {commands[byte_ptr]}"
+                f"current char at byte_ptr = {b_stream[byte_ptr]}"
             )
         byte_ptr += 1
         # Get length of array
         arr_length = ""
-        while commands[byte_ptr] != "\r":
-            arr_length += commands[byte_ptr]
+        while b_stream[byte_ptr] != "\r":
+            arr_length += b_stream[byte_ptr]
             byte_ptr += 1
         arr_length = int(arr_length)
         print(f"Length of array: {arr_length}")
-        while byte_ptr < len(commands) and commands[byte_ptr] != "$":
+        while byte_ptr < len(b_stream) and b_stream[byte_ptr] != "$":
             byte_ptr += 1
         print(f"byte_ptr before decoding command: {byte_ptr}")
         s, byte_ptr = decode_bulk_string(byte_ptr)
         print(f"Returned bulk string for decoding array: {s}")
         match s.lower():
             case "ping":
-                byte_ptr = await handle_pong_command(writer, byte_ptr)
+                await handle_pong_command()
             case "echo":
                 byte_ptr = await handle_echo_command(writer, byte_ptr)
             case "set":
@@ -1092,13 +1108,14 @@ async def decode_array(
                 await writer.drain()
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
-        if IN_MULTI_MODE is False:
-            for _ in range(byte_ptr):
-                if not commands:
-                    break
-                commands.popleft()
-            update_offset(byte_ptr)
-            byte_ptr = 0
+        for _ in range(byte_ptr):
+            if not b_stream:
+                break
+            b_stream.popleft()
+        update_offset(byte_ptr)
+        byte_ptr = 0
+        c = commands.pop()
+        await c.cb(c, writer)
 
 
 async def connection_handler(
@@ -1109,11 +1126,10 @@ async def connection_handler(
         if not data:
             break
         print(f"Received {data}")
-        global commands
-        commands.extend(data.decode())
-        print(f"Updated command queue: {commands}")
-        if commands:
-            match commands[0]:
+        b_stream.extend(data.decode())
+        print(f"Updated b_stream queue: {b_stream}")
+        if b_stream:
+            match b_stream[0]:
                 case "*":
                     print("About to start decoding array")
                     try:
