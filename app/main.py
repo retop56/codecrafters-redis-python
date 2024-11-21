@@ -10,6 +10,7 @@ import copy
 
 
 commands: deque[str] = deque()
+queued_commands: deque[str] = deque()
 # key_store: dict[str, tuple[str, Optional[float]]] = {}
 # """key --> (value, expiry)"""
 key_store: dict[str, "HashValue"] = {}
@@ -99,6 +100,7 @@ else:
     master_repl_offset = 0
 bytes_received = 0
 IN_MULTI_MODE = False
+byte_ptr = 0
 
 
 def rdb_file_process_expiry(f: BinaryIO, bytes_to_read: int) -> tuple[float, BinaryIO]:
@@ -286,15 +288,30 @@ async def handle_exec_command(writer: asyncio.StreamWriter) -> None:
     await writer.drain()
 
 
-async def handle_multi_command(writer: asyncio.StreamWriter) -> None:
+async def handle_multi_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     global IN_MULTI_MODE
-    IN_MULTI_MODE = True
-    writer.write("+OK\r\n".encode())
-    await writer.drain()
+    if IN_MULTI_MODE is False:
+        IN_MULTI_MODE = True
+        writer.write("+OK\r\n".encode())
+        await writer.drain()
+        # Clear out 'multi' command from command deque
+        global commands
+        for _ in range(byte_ptr):
+            if not commands:
+                break
+            commands.popleft()
+        update_offset(byte_ptr)
+        return 0
+    raise ValueError("Already in 'multi' mode!")
 
 
 async def handle_incr_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     key_to_incr, byte_ptr = decode_bulk_string(byte_ptr)
+    global IN_MULTI_MODE
+    if IN_MULTI_MODE:
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return byte_ptr
     val_belonging_to_key = key_store.get(key_to_incr)
     match val_belonging_to_key:
         case StringValue():
@@ -337,6 +354,11 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     for i in range(1, len(stream_keys_and_ids)):
         entry_id, byte_ptr = decode_bulk_string(byte_ptr)
         stream_keys_and_ids[i] = (*stream_keys_and_ids[i], entry_id)
+    global IN_MULTI_MODE
+    if IN_MULTI_MODE:
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return byte_ptr
     if block_time_ms == "0":
         blocked_command_queue = copy.deepcopy(commands)
         commands.clear()
@@ -435,6 +457,11 @@ async def handle_xread_command(writer: asyncio.StreamWriter, byte_ptr: int) -> i
     for i in range(1, len(stream_keys_and_ids)):
         entry_id, byte_ptr = decode_bulk_string(byte_ptr)
         stream_keys_and_ids[i] = (*stream_keys_and_ids[i], entry_id)
+    global IN_MULTI_MODE
+    if IN_MULTI_MODE:
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return byte_ptr
     result_arr = []
     for e in stream_keys_and_ids:
         result_arr.append(xread_retrieve_entries(*e))
@@ -524,6 +551,11 @@ async def handle_xrange_command(writer: asyncio.StreamWriter, byte_ptr: int) -> 
     stream_key, byte_ptr = decode_bulk_string(byte_ptr)
     start_id, byte_ptr = decode_bulk_string(byte_ptr)
     end_id, byte_ptr = decode_bulk_string(byte_ptr)
+    global IN_MULTI_MODE
+    if IN_MULTI_MODE:
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return byte_ptr
     if start_id == "-":
         result_arr = xrange_retrieve_entries_without_explicit_start(end_id, stream_key)
     elif end_id == "+":
@@ -805,6 +837,11 @@ async def handle_config_command(writer: asyncio.StreamWriter, byte_ptr: int) -> 
             f"'CONFIG' needs to be followed by 'GET'.\n" f"Instead, got {get_command}"
         )
     next_command, byte_ptr = decode_bulk_string(byte_ptr)
+    global IN_MULTI_MODE
+    if IN_MULTI_MODE:
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return byte_ptr
     match next_command:
         case "dir":
             response = f"*2\r\n$3\r\ndir\r\n${len(args.dir)}\r\n{args.dir}\r\n"
@@ -828,6 +865,11 @@ async def handle_config_command(writer: asyncio.StreamWriter, byte_ptr: int) -> 
 async def handle_get_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     print("Entered 'handle_get_command' function")
     key, byte_ptr = decode_bulk_string(byte_ptr)
+    global IN_MULTI_MODE
+    if IN_MULTI_MODE:
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return byte_ptr
     if key not in key_store:
         writer.write("$-1\r\n".encode())
         await writer.drain()
@@ -871,15 +913,20 @@ async def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int
         entry_val = NumValue(val=int(val), expiry=expiry_time)
     else:
         entry_val = StringValue(val=val, expiry=expiry_time)
+    global IN_MULTI_MODE
+    if IN_MULTI_MODE:
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return byte_ptr
     key_store[key] = entry_val
     print(f"Set {key} --> {repr(entry_val)}")
     if IS_MASTER:
         writer.write("+OK\r\n".encode())
         await writer.drain()
-        global connected_replicas
         command_to_replicate = (
             f"*3\r\n$3\r\nSET\r\n${len(key)}\r\n{key}\r\n${len(val)}\r\n{val}\r\n"
         )
+        global connected_replicas
         for replica_conn in connected_replicas.values():
             replica_conn.write(command_to_replicate.encode())
 
@@ -889,13 +936,22 @@ async def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int
 async def handle_echo_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     print(f"Byte_ptr position when entering echo command: {byte_ptr}")
     c, byte_ptr = decode_bulk_string(byte_ptr)
+    global IN_MULTI_MODE
+    if IN_MULTI_MODE:
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return byte_ptr
     writer.write(f"${len(c)}\r\n{c}\r\n".encode())
     await writer.drain()
     return byte_ptr
 
 
 async def handle_pong_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
-    if IS_MASTER:
+    global IN_MULTI_MODE
+    if IN_MULTI_MODE:
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+    elif IS_MASTER:
         writer.write("+PONG\r\n".encode())
         await writer.drain()
     return byte_ptr
@@ -937,6 +993,21 @@ def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
         return (result_str, byte_ptr)
     except IndexError:
         raise NotEnoughBytesToProcessCommand("decode_bulk_string")
+
+
+async def multi_mode_handler(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, data: str
+) -> None:
+    d_ptr = 0
+    while data[d_ptr] != "*":
+        global commands
+        commands.append(data[d_ptr])
+    # # Search for 'EXEC' command starting from temp_ptr
+    # exec_regex = re.compile(r"\*\d+\\r\\n\$\d+\\r\\nEXEC\\r\\n")
+    # temp_ptr = d_ptr
+    # pattern_match = exec_regex.match(data, temp_ptr)
+    # if pattern_match:
+    #     start_of_match, end_of_match = pattern_match.span()
 
 
 async def decode_array(writer: asyncio.StreamWriter) -> None:
@@ -995,17 +1066,18 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
             case "incr":
                 byte_ptr = await handle_incr_command(writer, byte_ptr)
             case "multi":
-                await handle_multi_command(writer)
-            case "exec":
-                await handle_exec_command(writer)
+                byte_ptr = await handle_multi_command(writer, byte_ptr)
+            # case "exec":
+            # await handle_exec_command(writer)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
-        for _ in range(byte_ptr):
-            if not commands:
-                break
-            commands.popleft()
-        update_offset(byte_ptr)
-        byte_ptr = 0
+        if IN_MULTI_MODE is False:
+            for _ in range(byte_ptr):
+                if not commands:
+                    break
+                commands.popleft()
+            update_offset(byte_ptr)
+            byte_ptr = 0
 
 
 async def connection_handler(
@@ -1016,8 +1088,12 @@ async def connection_handler(
         if not data:
             break
         print(f"Received {data}")
-        for d in data.decode():
-            commands.append(d)
+        global IN_MULTI_MODE
+        if IN_MULTI_MODE:
+            await multi_mode_handler(reader, writer, data.decode())
+            continue
+        global commands
+        commands.extend(data.decode())
         print(f"Updated command queue: {commands}")
         if commands:
             match commands[0]:
