@@ -264,6 +264,49 @@ def update_offset(byte_ptr: int) -> None:
         master_repl_offset += byte_ptr
 
 
+# async def xread_new_entries_only(
+#     writer: asyncio.StreamWriter,
+#     byte_ptr: int,
+#     stream_keys: list,
+#     block_time_ms: str,
+# ) -> int:
+
+#     # Capture current length of stream_key entries in key-store
+#     for i, s in enumerate(stream_keys):
+#         curr_stream_val = cast(StreamValue, key_store[s[0]])
+#         stream_keys[i] = (s[0], len(curr_stream_val.entry_dict))
+#     result_arr = []
+#     # If <block_time_ms> is zero, wait until a change has occurred before responding
+#     if block_time_ms == "0":
+#         blocked_command_queue = copy.deepcopy(command_deque)
+#         command_deque.clear()
+#         while True:
+#             for curr_key, prev_len in stream_keys:
+#                 curr_key_entry_dict = cast(StreamValue, key_store[curr_key]).entry_dict
+#                 if len(curr_key_entry_dict) > prev_len:
+#                     break
+#             else:
+#                 await asyncio.sleep(0)
+#                 continue
+#             break
+#         command_deque.extend(blocked_command_queue)
+#         # Find entries that are greater than amount listed in stream_keys
+#         for curr_key, prev_len in stream_keys:
+#             curr_key_entry_dict = cast(StreamValue, key_store[curr_key]).entry_dict
+#             if len(curr_key_entry_dict) > prev_len:
+#                 pass
+#             else:
+#                 pass
+#     # Block for <block_time_ms> amount of time and
+#     else:
+#         blocked_command_queue = copy.deepcopy(command_deque)
+#         command_deque.clear()
+#         await asyncio.sleep(int(block_time_ms) / 1000)
+#         command_deque.extend(blocked_command_queue)
+
+#     return byte_ptr
+
+
 async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     regex_for_entry_id = re.compile(r"\d+-\d+")
     block_time_ms, byte_ptr = decode_bulk_string(byte_ptr)
@@ -292,7 +335,8 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
         # Check if stream_key even exists in key_store. If it doesn't, wait until
         # entry is created under stream name. If it does, wait until another entry
         # is entry is added under stream name.
-        for stream_key, id in stream_keys_and_ids:
+        for i, v in enumerate(stream_keys_and_ids):
+            stream_key, id = v
             if stream_key in key_store:
                 curr_stream_val = cast(StreamValue, key_store[stream_key])
                 curr_len = len(curr_stream_val.entry_dict)
@@ -301,9 +345,13 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
                         break
                     else:
                         await asyncio.sleep(0)
+                if id == "$":
+                    stream_keys_and_ids[i] = (stream_key, id, curr_len)
             else:
                 while stream_key not in key_store:
                     await asyncio.sleep(0)
+                if id == "$":
+                    stream_keys_and_ids[i] = (stream_key, id, 0)
         command_deque.extend(blocked_command_queue)
     else:
         blocked_command_queue = copy.deepcopy(command_deque)
@@ -320,21 +368,33 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     return byte_ptr
 
 
-def xread_retrieve_entries(stream_key: str, greater_than_id: str) -> str:
-    gt_time, gt_seqNum = greater_than_id.split("-")
-    entries_for_stream_key = cast(StreamValue, key_store[stream_key]).entry_dict
-    result_arr = []
-    for k, v in entries_for_stream_key.items():
-        curr_time, curr_seqNum = k.split("-")
-        if curr_time >= gt_time and curr_seqNum > gt_seqNum:
-            result_arr.append(encode_entry_to_array(k, v))
-    if not result_arr:
-        return "$-1\r\n"
-    final_result = (
-        f"*2\r\n${len(stream_key)}\r\n{stream_key}\r\n*{len(result_arr)}\r\n"
-        + "".join(s for s in result_arr)
-    )
-    return final_result
+def xread_retrieve_entries(
+    stream_key: str, start_id: str, prev_len: Optional[int] = None
+) -> str:
+    if start_id != "$":
+        gt_time, gt_seqNum = start_id.split("-")
+        entries_for_stream_key = cast(StreamValue, key_store[stream_key]).entry_dict
+        result_arr = []
+        for k, v in entries_for_stream_key.items():
+            curr_time, curr_seqNum = k.split("-")
+            if curr_time >= gt_time and curr_seqNum > gt_seqNum:
+                result_arr.append(encode_entry_to_array(k, v))
+        if not result_arr:
+            return "$-1\r\n"
+        final_result = (
+            f"*2\r\n${len(stream_key)}\r\n{stream_key}\r\n*{len(result_arr)}\r\n"
+            + "".join(s for s in result_arr)
+        )
+        return final_result
+    else:
+        if prev_len is None:
+            raise ValueError(
+                "If start_id is '$', previous length of key should be provided!"
+            )
+        entries_for_stream_key = cast(StreamValue, key_store[stream_key]).entry_dict
+        result_arr = []
+
+        return ""
 
 
 async def handle_xread_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
