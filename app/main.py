@@ -28,12 +28,22 @@ class HashValue:
 
 
 class StringValue(HashValue):
-    def __init__(self, str_val: str, expiry: Optional[float]) -> None:
-        self.str_val = str_val
+    def __init__(self, val: str, expiry: Optional[float]) -> None:
+        self.val = val
         self.expiry = expiry
 
     def str_repr_of_val(self) -> str:
-        return f"${len(self.str_val)}\r\n{self.str_val}\r\n"
+        return f"${len(self.val)}\r\n{self.val}\r\n"
+
+
+class NumValue(HashValue):
+    def __init__(self, val: int, expiry: Optional[float]) -> None:
+        self.val = val
+        self.expiry = expiry
+
+    def str_repr_of_val(self) -> str:
+        str_val = str(self.val)
+        return f"${len(str_val)}\r\n{str_val}\r\n"
 
 
 class StreamValue(HashValue):
@@ -109,7 +119,7 @@ def rdb_file_process_ht_entry(f: BinaryIO) -> BinaryIO:
         case b"\x00":
             key, f = rdb_file_process_string_encoded_value(f)
             val, f = rdb_file_process_string_encoded_value(f)
-            key_store[key] = StringValue(str_val=val, expiry=None)
+            key_store[key] = StringValue(val=val, expiry=None)
         # Indicates that this key has an expire, and that the expire
         # timestamp is expressed in milliseconds
         case b"\xFC":
@@ -121,7 +131,7 @@ def rdb_file_process_ht_entry(f: BinaryIO) -> BinaryIO:
                 raise ValueError(f"Invalid key_value type! (Found: {f.read(1)})")
             key, f = rdb_file_process_string_encoded_value(f)
             val, f = rdb_file_process_string_encoded_value(f)
-            key_store[key] = StringValue(str_val=val, expiry=expiry)
+            key_store[key] = StringValue(val=val, expiry=expiry)
         # Indicates that this key ("baz") has an expire,
         # and that the expire timestamp is expressed in seconds. */
         case b"\xFD":
@@ -131,7 +141,7 @@ def rdb_file_process_ht_entry(f: BinaryIO) -> BinaryIO:
                 raise ValueError(f"Invalid key_value type! (Found: {f.read(1)})")
             key, f = rdb_file_process_string_encoded_value(f)
             val, f = rdb_file_process_string_encoded_value(f)
-            key_store[key] = StringValue(str_val=val, expiry=expiry)
+            key_store[key] = StringValue(val=val, expiry=expiry)
         case _:
             raise ValueError("Unable to process hash-table entry from RDB file!")
 
@@ -269,9 +279,9 @@ async def handle_incr_command(writer: asyncio.StreamWriter, byte_ptr: int) -> in
     val = key_store.get(key_to_incr)
     match val:
         case StringValue():
-            if val.str_val.isdigit():
-                val.str_val = str(int(val.str_val) + 1)
-                writer.write(f":{val.str_val}\r\n".encode())
+            if val.val.isdigit():
+                val.val = str(int(val.val) + 1)
+                writer.write(f":{val.val}\r\n".encode())
                 await writer.drain()
             else:
                 writer.write(
@@ -279,7 +289,7 @@ async def handle_incr_command(writer: asyncio.StreamWriter, byte_ptr: int) -> in
                 )
                 await writer.drain()
         case None:
-            key_store[key_to_incr] = StringValue(str_val="1", expiry=None)
+            key_store[key_to_incr] = StringValue(val="1", expiry=None)
             writer.write(":1\r\n".encode())
             await writer.drain()
         case _:
@@ -839,7 +849,7 @@ async def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int
             expiry_time = None
     except (NotEnoughBytesToProcessCommand, ValueError):
         expiry_time = None
-    entry_val = StringValue(str_val=val, expiry=expiry_time)
+    entry_val = StringValue(val=val, expiry=expiry_time)
     key_store[key] = entry_val
     print(f"Set {key} --> {repr(entry_val)}")
     if IS_MASTER:
