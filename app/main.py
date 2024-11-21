@@ -274,6 +274,11 @@ def update_offset(byte_ptr: int) -> None:
         master_repl_offset += byte_ptr
 
 
+async def handle_multi_command(writer: asyncio.StreamWriter) -> None:
+    writer.write("+OK\r\n".encode())
+    await writer.drain()
+
+
 async def handle_incr_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     key_to_incr, byte_ptr = decode_bulk_string(byte_ptr)
     val_belonging_to_key = key_store.get(key_to_incr)
@@ -975,6 +980,8 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
                 byte_ptr = await handle_xread_command(writer, byte_ptr)
             case "incr":
                 byte_ptr = await handle_incr_command(writer, byte_ptr)
+            case "multi":
+                await handle_multi_command(writer)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
         for _ in range(byte_ptr):
