@@ -266,11 +266,15 @@ def update_offset(byte_ptr: int) -> None:
 
 async def handle_incr_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     key_to_incr, byte_ptr = decode_bulk_string(byte_ptr)
-    val = key_store[key_to_incr]
+    val = key_store.get(key_to_incr)
     match val:
         case StringValue():
             val.str_val = str(int(val.str_val) + 1)
             writer.write(f":{val.str_val}\r\n".encode())
+            await writer.drain()
+        case None:
+            key_store[key_to_incr] = StringValue(str_val="1", expiry=None)
+            writer.write(":1\r\n".encode())
             await writer.drain()
         case _:
             raise TypeError(f"Cannot increment value of type '{type(val).__name__}'")
