@@ -269,9 +269,15 @@ async def handle_incr_command(writer: asyncio.StreamWriter, byte_ptr: int) -> in
     val = key_store.get(key_to_incr)
     match val:
         case StringValue():
-            val.str_val = str(int(val.str_val) + 1)
-            writer.write(f":{val.str_val}\r\n".encode())
-            await writer.drain()
+            if val.str_val.isdigit():
+                val.str_val = str(int(val.str_val) + 1)
+                writer.write(f":{val.str_val}\r\n".encode())
+                await writer.drain()
+            else:
+                writer.write(
+                    "-ERR value is not an integer or out of range\r\n".encode()
+                )
+                await writer.drain()
         case None:
             key_store[key_to_incr] = StringValue(str_val="1", expiry=None)
             writer.write(":1\r\n".encode())
