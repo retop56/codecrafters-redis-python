@@ -7,6 +7,7 @@ import random
 import string
 import re
 import copy
+import itertools
 
 
 commands: deque[str] = deque()
@@ -300,6 +301,9 @@ async def handle_multi_command(writer: asyncio.StreamWriter, byte_ptr: int) -> i
             if not commands:
                 break
             commands.popleft()
+        # Add anything else after 'multi' command to <queued_commands>
+        queued_commands.extend(itertools.islice(commands, byte_ptr, len(commands)))
+        commands.clear()
         update_offset(byte_ptr)
         return 0
     raise ValueError("Already in 'multi' mode!")
@@ -998,16 +1002,36 @@ def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
 async def multi_mode_handler(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter, data: str
 ) -> None:
-    d_ptr = 0
-    while data[d_ptr] != "*":
-        global commands
-        commands.append(data[d_ptr])
+    # d_ptr = 0
+    # while data[d_ptr] != "*":
+    # global commands
+    # commands.append(data[d_ptr])
     # # Search for 'EXEC' command starting from temp_ptr
     # exec_regex = re.compile(r"\*\d+\\r\\n\$\d+\\r\\nEXEC\\r\\n")
     # temp_ptr = d_ptr
     # pattern_match = exec_regex.match(data, temp_ptr)
     # if pattern_match:
     #     start_of_match, end_of_match = pattern_match.span()
+
+    # First check if complete exec command is in data we just got. If it is, slice
+    # that out of the data, call <handle_exec_command>, and then append the rest
+    # and go from there
+    exec_regex = re.compile(r"\*\d+\\r\\n\$\d+\\r\\nEXEC\\r\\n")
+    pattern_match = exec_regex.match(data)
+    if pattern_match:
+        start_of_match, end_of_match = pattern_match.span()
+        new_data = data[:start_of_match] + data[end_of_match:]
+        await handle_exec_command(writer)
+        global commands
+        commands.extend(queued_commands)
+        queued_commands.clear()
+        commands.extend(new_data)
+        global IN_MULTI_MODE
+        IN_MULTI_MODE = False
+        return
+    # # Add everything we just got to commands
+    # global commands
+    # commands.extend(data)
 
 
 async def decode_array(writer: asyncio.StreamWriter) -> None:
@@ -1067,8 +1091,9 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
                 byte_ptr = await handle_incr_command(writer, byte_ptr)
             case "multi":
                 byte_ptr = await handle_multi_command(writer, byte_ptr)
-            # case "exec":
-            # await handle_exec_command(writer)
+            case "exec":
+                writer.write("-ERR EXEC without MULTI\r\n".encode())
+                await writer.drain()
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
         if IN_MULTI_MODE is False:
