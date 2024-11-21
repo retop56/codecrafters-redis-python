@@ -7,7 +7,6 @@ import random
 import string
 import re
 import copy
-import itertools
 
 
 commands: deque[str] = deque()
@@ -1006,21 +1005,23 @@ async def multi_mode_handler(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> None:
     while True:
-        if len(queued_commands) >= len(exec_command):
-            for i in range(0, len(queued_commands) - len(exec_command)):
-                window = "".join(
-                    itertools.islice(queued_commands, i, i + len(exec_command))
-                )
-                if window == exec_command:
-                    for k in range(i, i + len(exec_command)):
-                        del queued_commands[k]
-                    commands.extend(queued_commands)
-                    queued_commands.clear()
-                    await handle_exec_command(writer)
-                    return
-        else:
-            data = await reader.read(100)
-            queued_commands.extend(data.decode())
+        # exec_command = r"\*\d+\\r\\n\$\d+\\r\\nEXEC\\r\\n
+        regex = r"\*\d+\r\n\$\d+\r\nEXEC\r\n"
+        exec_regex = re.compile(regex)
+        global queued_commands
+        queued_commands_string = "".join(queued_commands)
+        pattern_match = exec_regex.match(queued_commands_string)
+        if pattern_match:
+            start_of_match, end_of_match = pattern_match.span()
+            stuff_to_add = (
+                queued_commands_string[:start_of_match]
+                + queued_commands_string[:end_of_match]
+            )
+            global commands
+            commands.extend(stuff_to_add)
+            queued_commands.clear()
+            await handle_exec_command(writer)
+            return
 
     # First check if complete exec command is in data we just got. If it is, slice
     # that out of the data, call <handle_exec_command>, and then append the rest
