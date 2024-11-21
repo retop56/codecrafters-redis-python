@@ -289,7 +289,9 @@ async def handle_exec_command(writer: asyncio.StreamWriter) -> None:
     await writer.drain()
 
 
-async def handle_multi_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_multi_command(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, byte_ptr: int
+) -> int:
     global IN_MULTI_MODE
     if IN_MULTI_MODE is False:
         IN_MULTI_MODE = True
@@ -302,8 +304,9 @@ async def handle_multi_command(writer: asyncio.StreamWriter, byte_ptr: int) -> i
                 break
             commands.popleft()
         # Add anything else after 'multi' command to <queued_commands>
-        queued_commands.extend(itertools.islice(commands, byte_ptr, len(commands)))
+        queued_commands.extend(commands)
         commands.clear()
+        await multi_mode_handler(reader, writer)
         update_offset(byte_ptr)
         return 0
     raise ValueError("Already in 'multi' mode!")
@@ -1000,41 +1003,64 @@ def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
 
 
 async def multi_mode_handler(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, data: str
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> None:
-    # d_ptr = 0
-    # while data[d_ptr] != "*":
-    # global commands
-    # commands.append(data[d_ptr])
-    # # Search for 'EXEC' command starting from temp_ptr
-    # exec_regex = re.compile(r"\*\d+\\r\\n\$\d+\\r\\nEXEC\\r\\n")
-    # temp_ptr = d_ptr
-    # pattern_match = exec_regex.match(data, temp_ptr)
-    # if pattern_match:
-    #     start_of_match, end_of_match = pattern_match.span()
+    while True:
+        if len(queued_commands) >= len(exec_command):
+            for i in range(0, len(queued_commands) - len(exec_command)):
+                window = "".join(
+                    itertools.islice(queued_commands, i, i + len(exec_command))
+                )
+                if window == exec_command:
+                    for k in range(i, i + len(exec_command)):
+                        del queued_commands[k]
+                    commands.extend(queued_commands)
+                    queued_commands.clear()
+                    await handle_exec_command(writer)
+                    return
+        else:
+            data = await reader.read(100)
+            queued_commands.extend(data.decode())
 
     # First check if complete exec command is in data we just got. If it is, slice
     # that out of the data, call <handle_exec_command>, and then append the rest
     # and go from there
-    exec_regex = re.compile(r"\*\d+\\r\\n\$\d+\\r\\nEXEC\\r\\n")
-    pattern_match = exec_regex.match(data)
-    if pattern_match:
-        start_of_match, end_of_match = pattern_match.span()
-        new_data = data[:start_of_match] + data[end_of_match:]
-        await handle_exec_command(writer)
-        global commands
-        commands.extend(queued_commands)
-        queued_commands.clear()
-        commands.extend(new_data)
-        global IN_MULTI_MODE
-        IN_MULTI_MODE = False
-        return
-    # # Add everything we just got to commands
-    # global commands
-    # commands.extend(data)
+    # while True:
+    #     exec_command = r"\*\d+\\r\\n\$\d+\\r\\nEXEC\\r\\n"
+    #     exec_regex = re.compile(exec_command)
+    #     pattern_match = exec_regex.match(data)
+    #     if pattern_match:
+    #         start_of_match, end_of_match = pattern_match.span()
+    #         new_data = data[:start_of_match] + data[end_of_match:]
+    #         await handle_exec_command(writer)
+    #         global commands, queued_commands
+    #         commands.extend(queued_commands)
+    #         queued_commands.clear()
+    #         commands.extend(new_data)
+    #         global IN_MULTI_MODE
+    #         IN_MULTI_MODE = False
+    #         return
+    #     # Continue reading in data, appending to <queued_commands>, and
+    #     # searching for full exec command
+    #     while True:
+    #         new_data = await reader.read(100)
+    #         queued_commands.extend(new_data.decode())
+    #         if len(queued_commands) < len(exec_command):
+    #             continue
+    #         for i in range(0, len(queued_commands) - len(exec_command)):
+    #             window = "".join(
+    #                 itertools.islice(queued_commands, i, i + len(exec_command))
+    #             )
+    #             if window == exec_command:
+    #                 for k in range(i, i + len(exec_command)):
+    #                     del queued_commands[k]
+    #                 commands.extend(queued_commands)
+    #                 return
 
 
-async def decode_array(writer: asyncio.StreamWriter) -> None:
+async def decode_array(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
     byte_ptr = 0
     while commands:
         if commands[byte_ptr] != "*":
@@ -1090,7 +1116,7 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
             case "incr":
                 byte_ptr = await handle_incr_command(writer, byte_ptr)
             case "multi":
-                byte_ptr = await handle_multi_command(writer, byte_ptr)
+                byte_ptr = await handle_multi_command(reader, writer, byte_ptr)
             case "exec":
                 writer.write("-ERR EXEC without MULTI\r\n".encode())
                 await writer.drain()
@@ -1113,10 +1139,6 @@ async def connection_handler(
         if not data:
             break
         print(f"Received {data}")
-        global IN_MULTI_MODE
-        if IN_MULTI_MODE:
-            await multi_mode_handler(reader, writer, data.decode())
-            continue
         global commands
         commands.extend(data.decode())
         print(f"Updated command queue: {commands}")
@@ -1125,7 +1147,7 @@ async def connection_handler(
                 case "*":
                     print("About to start decoding array")
                     try:
-                        await decode_array(writer)
+                        await decode_array(reader, writer)
                     except NotEnoughBytesToProcessCommand as err:
                         print(
                             f"'{err.args}' did not have enough bytes to process command. "
