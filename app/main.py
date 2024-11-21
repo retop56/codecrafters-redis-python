@@ -287,6 +287,8 @@ async def handle_exec_command(writer: asyncio.StreamWriter) -> None:
 
 
 async def handle_multi_command(writer: asyncio.StreamWriter) -> None:
+    global IN_MULTI_MODE
+    IN_MULTI_MODE = True
     writer.write("+OK\r\n".encode())
     await writer.drain()
 
