@@ -9,7 +9,7 @@ import re
 import copy
 
 
-command_deque: deque[str] = deque()
+commands: deque[str] = deque()
 # key_store: dict[str, tuple[str, Optional[float]]] = {}
 # """key --> (value, expiry)"""
 key_store: dict[str, "HashValue"] = {}
@@ -260,9 +260,9 @@ def read_rdb_file_from_disk():
 
 def clear_bad_command(byte_ptr: int) -> int:
     for _ in range(byte_ptr):
-        command_deque.popleft()
-    while command_deque and command_deque[0] != "*":
-        command_deque.popleft()
+        commands.popleft()
+    while commands and commands[0] != "*":
+        commands.popleft()
     return 0
 
 
@@ -276,9 +276,14 @@ def update_offset(byte_ptr: int) -> None:
 
 
 async def handle_exec_command(writer: asyncio.StreamWriter) -> None:
+    global IN_MULTI_MODE
     if IN_MULTI_MODE is False:
         writer.write("-ERR EXEC without MULTI\r\n".encode())
         await writer.drain()
+        return
+    IN_MULTI_MODE = False
+    writer.write("*0\r\n".encode())
+    await writer.drain()
 
 
 async def handle_multi_command(writer: asyncio.StreamWriter) -> None:
@@ -331,8 +336,8 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
         entry_id, byte_ptr = decode_bulk_string(byte_ptr)
         stream_keys_and_ids[i] = (*stream_keys_and_ids[i], entry_id)
     if block_time_ms == "0":
-        blocked_command_queue = copy.deepcopy(command_deque)
-        command_deque.clear()
+        blocked_command_queue = copy.deepcopy(commands)
+        commands.clear()
         # Check if stream_key even exists in key_store. If it doesn't, wait until
         # entry is created under stream name. If it does, wait until another entry
         # is entry is added under stream name.
@@ -353,13 +358,13 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
                     await asyncio.sleep(0)
                 if id == "$":
                     stream_keys_and_ids[i] = (stream_key, id, 0)
-        command_deque.extend(blocked_command_queue)
+        commands.extend(blocked_command_queue)
     else:
-        blocked_command_queue = copy.deepcopy(command_deque)
-        command_deque.clear()
+        blocked_command_queue = copy.deepcopy(commands)
+        commands.clear()
         print(f"Blocking for {block_time_ms} ms")
         await asyncio.sleep(int(block_time_ms) / 1000)
-        command_deque.extend(blocked_command_queue)
+        commands.extend(blocked_command_queue)
     result_arr = []
     for e in stream_keys_and_ids:
         result_arr.append(xread_retrieve_entries(*e))
@@ -896,21 +901,21 @@ async def handle_pong_command(writer: asyncio.StreamWriter, byte_ptr: int) -> in
 
 def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
     try:
-        if command_deque[byte_ptr] != "$":
+        if commands[byte_ptr] != "$":
             raise ValueError(
                 f"Expected '$' before length of bulk string. "
-                f"Instead, got {command_deque[byte_ptr]}"
+                f"Instead, got {commands[byte_ptr]}"
             )
         # Skip past "$"
         byte_ptr += 1
         str_len = ""
-        while command_deque[byte_ptr] != "\r":
-            str_len += command_deque[byte_ptr]
+        while commands[byte_ptr] != "\r":
+            str_len += commands[byte_ptr]
             byte_ptr += 1
         byte_ptr += 1
-        if command_deque[byte_ptr] != "\n":
+        if commands[byte_ptr] != "\n":
             print(
-                f"Expected \\n at index {byte_ptr}, instead found {command_deque[byte_ptr]}"
+                f"Expected \\n at index {byte_ptr}, instead found {commands[byte_ptr]}"
             )
             raise NotEnoughBytesToProcessCommand("decode_bulk_string")
         byte_ptr += 1
@@ -919,9 +924,9 @@ def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
         start = byte_ptr
         end = byte_ptr + str_len
         print(f"Bulk string start ind, end ind: {start}, {end}")
-        result_str = "".join(command_deque[c] for c in range(start, end))
+        result_str = "".join(commands[c] for c in range(start, end))
         # Skip past "\r\n" after end of string-contents
-        end_of_bulk_string = f"{command_deque[end]}{command_deque[end + 1]}"
+        end_of_bulk_string = f"{commands[end]}{commands[end + 1]}"
         if end_of_bulk_string != "\r\n":
             print(
                 f"Expected \\r\\n at end of bulk string, instead got {end_of_bulk_string}"
@@ -934,22 +939,22 @@ def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
 
 async def decode_array(writer: asyncio.StreamWriter) -> None:
     byte_ptr = 0
-    while command_deque:
-        if command_deque[byte_ptr] != "*":
+    while commands:
+        if commands[byte_ptr] != "*":
             raise ValueError(
                 f"Array is supposed to start with '*' "
                 f"(Current byte_ptr = {byte_ptr}, "
-                f"current char at byte_ptr = {command_deque[byte_ptr]}"
+                f"current char at byte_ptr = {commands[byte_ptr]}"
             )
         byte_ptr += 1
         # Get length of array
         arr_length = ""
-        while command_deque[byte_ptr] != "\r":
-            arr_length += command_deque[byte_ptr]
+        while commands[byte_ptr] != "\r":
+            arr_length += commands[byte_ptr]
             byte_ptr += 1
         arr_length = int(arr_length)
         print(f"Length of array: {arr_length}")
-        while byte_ptr < len(command_deque) and command_deque[byte_ptr] != "$":
+        while byte_ptr < len(commands) and commands[byte_ptr] != "$":
             byte_ptr += 1
         print(f"byte_ptr before decoding command: {byte_ptr}")
         s, byte_ptr = decode_bulk_string(byte_ptr)
@@ -994,9 +999,9 @@ async def decode_array(writer: asyncio.StreamWriter) -> None:
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
         for _ in range(byte_ptr):
-            if not command_deque:
+            if not commands:
                 break
-            command_deque.popleft()
+            commands.popleft()
         update_offset(byte_ptr)
         byte_ptr = 0
 
@@ -1010,10 +1015,10 @@ async def connection_handler(
             break
         print(f"Received {data}")
         for d in data.decode():
-            command_deque.append(d)
-        print(f"Updated command queue: {command_deque}")
-        if command_deque:
-            match command_deque[0]:
+            commands.append(d)
+        print(f"Updated command queue: {commands}")
+        if commands:
+            match commands[0]:
                 case "*":
                     print("About to start decoding array")
                     try:
