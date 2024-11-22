@@ -273,6 +273,39 @@ def read_rdb_file_from_disk():
         return
 
 
+async def execute_xadd_command(c: Command, writer: asyncio.StreamWriter) -> None:
+    if IN_MULTI_MODE:
+        multi_commands.append(c)
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return
+    if not c.args:
+        raise ValueError("Can't process 'XADD' command with empty args dictionary!")
+    if "error" in c.args:
+        response = c.args["error"]
+    else:
+        entry_id, stream_key = (
+            c.args["entry_id"],
+            c.args["stream_key"],
+        )
+        if c.args["new_stream"]:
+            entry_dict = c.args["entry_dict"]
+            stream_entry = StreamValue(entry_dict={entry_id: entry_dict})
+            key_store[stream_key] = stream_entry
+        else:
+            temp_dict = c.args["temp_dict"]
+            existing_entry = cast(StreamValue, key_store[stream_key])
+            for k, v in temp_dict.items():
+                if entry_id in existing_entry.entry_dict:
+                    existing_entry.entry_dict[entry_id][k] = v
+                else:
+                    existing_entry.entry_dict[entry_id] = {k: v}
+        response = f"${len(entry_id)}\r\n{entry_id}\r\n"
+
+    writer.write(response.encode())
+    await writer.drain()
+
+
 async def execute_type_command(c: Command, writer: asyncio.StreamWriter) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
@@ -799,13 +832,16 @@ def gen_time_and_SeqNum_from_entry_id(
 async def handle_xadd_command(
     writer: asyncio.StreamWriter, byte_ptr: int, command_length: int
 ) -> int:
+    args = {}
     stream_key, byte_ptr = decode_bulk_string(byte_ptr)
+    args["stream_key"] = stream_key
     print(f"Stream key: {stream_key}")
     command_length -= 1
     orig_entry_id, byte_ptr = decode_bulk_string(byte_ptr)
     command_length -= 1
     time_id, seqNum_id = gen_time_and_SeqNum_from_entry_id(orig_entry_id, stream_key)
     new_entry_id = f"{time_id}-{seqNum_id}"
+    args["entry_id"] = new_entry_id
     print(f"Entry ID: {new_entry_id}")
     if (command_length % 2) != 0:
         raise ValueError(
@@ -816,20 +852,25 @@ async def handle_xadd_command(
     # * Create new stream *
     # *********************
     if stream_key not in key_store:
+        args["new_stream"] = True
         entry_dict = {}
         num_of_kv_pairs_in_entry = int(command_length / 2)
         for _ in range(num_of_kv_pairs_in_entry):
             key, byte_ptr = decode_bulk_string(byte_ptr)
             val, byte_ptr = decode_bulk_string(byte_ptr)
             entry_dict[key] = val
-        stream_entry = StreamValue(entry_dict={new_entry_id: entry_dict})
-        key_store[stream_key] = stream_entry
-        writer.write(f"${len(new_entry_id)}\r\n{new_entry_id}\r\n".encode())
-        await writer.drain()
+        args["entry_dict"] = entry_dict
+        c = Command(cb=execute_xadd_command, args=args)
+        commands.append(c)
+        # stream_entry = StreamValue(entry_dict={new_entry_id: entry_dict})
+        # key_store[stream_key] = stream_entry
+        # writer.write(f"${len(new_entry_id)}\r\n{new_entry_id}\r\n".encode())
+        # await writer.drain()
         return byte_ptr
     # ***************************
     # * Add to exisiting stream *
     # ***************************
+    args["new_stream"] = False
     existing_entry = cast(StreamValue, key_store[stream_key])
     # The <millisecondsTime> is greater than or equal to the <millisecondsTime>
     # of the last entry
@@ -838,38 +879,53 @@ async def handle_xadd_command(
     ].split("-")
     # If the stream is empty, the ID should be greater than 0-0
     if int(time_id) <= 0 and int(seqNum_id) <= 1:
-        writer.write(
-            "-ERR The ID specified in XADD must be greater than 0-0\r\n".encode()
-        )
-        await writer.drain()
-        print("-ERR The ID specified in XADD must be greater than 0-0")
+        args["error"] = "-ERR The ID specified in XADD must be greater than 0-0\r\n"
+        # writer.write(
+        #     "-ERR The ID specified in XADD must be greater than 0-0\r\n".encode()
+        # )
+        # await writer.drain()
+        # print("-ERR The ID specified in XADD must be greater than 0-0")
+        c = Command(cb=execute_xadd_command, args=args)
+        commands.append(c)
         byte_ptr = clear_bad_command(byte_ptr)
         return byte_ptr
     if time_id < last_entry_id_time:
-        writer.write(
+        args["error"] = (
             "-ERR The ID specified in XADD is equal or smaller than "
-            "the target stream top item\r\n".encode()
+            "the target stream top item\r\n"
         )
-        await writer.drain()
-        print(
-            "-ERR The ID specified in XADD is equal or smaller "
-            "than the target stream top item\r\n"
-        )
+        # writer.write(
+        #     "-ERR The ID specified in XADD is equal or smaller than "
+        #     "the target stream top item\r\n".encode()
+        # )
+        # await writer.drain()
+        # print(
+        #     "-ERR The ID specified in XADD is equal or smaller "
+        #     "than the target stream top item\r\n"
+        # )
+        c = Command(cb=execute_xadd_command, args=args)
+        commands.append(c)
         byte_ptr = clear_bad_command(byte_ptr)
         return byte_ptr
     # If the millisecondsTime part of the ID is equal to the millisecondsTime
     # of the last entry, the sequenceNumber part of the ID should be greater
     # than the sequenceNumber of the last entry
     if time_id == last_entry_id_time and seqNum_id <= last_entry_id_seq_num:
-        writer.write(
+        args["error"] = (
             "-ERR The ID specified in XADD is equal or smaller than "
-            "the target stream top item\r\n".encode()
+            "the target stream top item\r\n"
         )
-        await writer.drain()
-        print(
-            "-ERR The ID specified in XADD is equal or smaller "
-            "than the target stream top item\r\n"
-        )
+        # writer.write(
+        #     "-ERR The ID specified in XADD is equal or smaller than "
+        #     "the target stream top item\r\n".encode()
+        # )
+        # await writer.drain()
+        # print(
+        #     "-ERR The ID specified in XADD is equal or smaller "
+        #     "than the target stream top item\r\n"
+        # )
+        c = Command(cb=execute_xadd_command, args=args)
+        commands.append(c)
         byte_ptr = clear_bad_command(byte_ptr)
         return byte_ptr
     num_of_kv_pairs_in_entry = int(command_length / 2)
@@ -879,11 +935,15 @@ async def handle_xadd_command(
         key, byte_ptr = decode_bulk_string(byte_ptr)
         val, byte_ptr = decode_bulk_string(byte_ptr)
         temp_dict[key] = val
-    for k, v in temp_dict.items():
-        if new_entry_id in existing_entry.entry_dict:
-            existing_entry.entry_dict[new_entry_id][k] = v
-        else:
-            existing_entry.entry_dict[new_entry_id] = {k: v}
+    args["temp_dict"] = temp_dict
+    c = Command(cb=execute_xadd_command, args=args)
+    commands.append(c)
+    return byte_ptr
+    # for k, v in temp_dict.items():
+    #     if new_entry_id in existing_entry.entry_dict:
+    #         existing_entry.entry_dict[new_entry_id][k] = v
+    #     else:
+    #         existing_entry.entry_dict[new_entry_id] = {k: v}
 
     writer.write(f"${len(new_entry_id)}\r\n{new_entry_id}\r\n".encode())
     await writer.drain()
