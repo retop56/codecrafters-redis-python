@@ -22,8 +22,6 @@ args = parser.parse_args()
 
 b_stream: deque[str] = deque()
 commands: deque["Command"] = deque()
-multi_commands: deque["Command"] = deque()
-queued_responses: list[str] = []
 # key_store: dict[str, tuple[str, Optional[float]]] = {}
 # """key --> (value, expiry)"""
 key_store: dict[str, "HashValue"] = {}
@@ -280,13 +278,15 @@ class Connection_Object:
         self.reader = reader
         self.writer = writer
         self.in_multi_mode = False
+        self.multi_commands: deque["Command"] = deque()
+        self.queued_responses: list[str] = []
 
     async def execute_discard_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode is False:
             self.writer.write("-ERR DISCARD without MULTI\r\n".encode())
             return
-        multi_commands.clear()
-        queued_responses.clear()
+        self.multi_commands.clear()
+        self.queued_responses.clear()
         self.writer.write("+OK\r\n".encode())
         await self.writer.drain()
         self.in_multi_mode = False
@@ -297,15 +297,15 @@ class Connection_Object:
             await self.writer.drain()
             return
         self.in_multi_mode = False
-        while multi_commands:
-            multi_c = multi_commands.popleft()
+        while self.multi_commands:
+            multi_c = self.multi_commands.popleft()
             # callback_args = Command, exec_mode
             await multi_c.cb(multi_c, True)
 
-        response = f"*{len(queued_responses)}\r\n" + "".join(
-            r for r in queued_responses
+        response = f"*{len(self.queued_responses)}\r\n" + "".join(
+            r for r in self.queued_responses
         )
-        queued_responses.clear()
+        self.queued_responses.clear()
         self.writer.write(response.encode())
         await self.writer.drain()
 
@@ -313,14 +313,14 @@ class Connection_Object:
         self.in_multi_mode = True
         response = "+OK\r\n"
         if exec_mode:
-            queued_responses.append(response)
+            self.queued_responses.append(response)
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
 
     async def execute_incr_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
-            multi_commands.append(c)
+            self.multi_commands.append(c)
             self.writer.write("+QUEUED\r\n".encode())
             await self.writer.drain()
             return
@@ -343,14 +343,14 @@ class Connection_Object:
                 )
 
         if exec_mode:
-            queued_responses.append(response)
+            self.queued_responses.append(response)
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
 
     async def execute_xread_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
-            multi_commands.append(c)
+            self.multi_commands.append(c)
             self.writer.write("+QUEUED\r\n".encode())
             await self.writer.drain()
             return
@@ -365,14 +365,14 @@ class Connection_Object:
         response = f"*{len(stream_keys_and_ids)}\r\n" + "".join(s for s in result_arr)
 
         if exec_mode:
-            queued_responses.append(response)
+            self.queued_responses.append(response)
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
 
     async def execute_xrange_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
-            multi_commands.append(c)
+            self.multi_commands.append(c)
             self.writer.write("+QUEUED\r\n".encode())
             await self.writer.drain()
             return
@@ -402,14 +402,14 @@ class Connection_Object:
         response = f"*{len(result_arr)}\r\n" + "".join(r for r in result_arr)
 
         if exec_mode:
-            queued_responses.append(response)
+            self.queued_responses.append(response)
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
 
     async def execute_xadd_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
-            multi_commands.append(c)
+            self.multi_commands.append(c)
             self.writer.write("+QUEUED\r\n".encode())
             await self.writer.drain()
             return
@@ -437,14 +437,14 @@ class Connection_Object:
             response = f"${len(entry_id)}\r\n{entry_id}\r\n"
 
         if exec_mode:
-            queued_responses.append(response)
+            self.queued_responses.append(response)
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
 
     async def execute_type_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
-            multi_commands.append(c)
+            self.multi_commands.append(c)
             self.writer.write("+QUEUED\r\n".encode())
             await self.writer.drain()
             return
@@ -467,14 +467,14 @@ class Connection_Object:
                     )
 
         if exec_mode:
-            queued_responses.append(response)
+            self.queued_responses.append(response)
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
 
     async def execute_keys_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
-            multi_commands.append(c)
+            self.multi_commands.append(c)
             self.writer.write("+QUEUED\r\n".encode())
             await self.writer.drain()
             return
@@ -490,14 +490,14 @@ class Connection_Object:
             response += f"${len(k)}\r\n{k}\r\n"
 
         if exec_mode:
-            queued_responses.append(response)
+            self.queued_responses.append(response)
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
 
     async def execute_config_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
-            multi_commands.append(c)
+            self.multi_commands.append(c)
             self.writer.write("+QUEUED\r\n".encode())
             await self.writer.drain()
             return
@@ -517,14 +517,14 @@ class Connection_Object:
                 raise ValueError("Unable to process 'CONFIG' parameter!")
 
         if exec_mode:
-            queued_responses.append(response)
+            self.queued_responses.append(response)
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
 
     async def execute_get_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
-            multi_commands.append(c)
+            self.multi_commands.append(c)
             self.writer.write("+QUEUED\r\n".encode())
             await self.writer.drain()
             return
@@ -547,14 +547,14 @@ class Connection_Object:
                     raise TypeError("Unable to process get command with given key")
 
         if exec_mode:
-            queued_responses.append(response)
+            self.queued_responses.append(response)
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
 
     async def execute_set_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
-            multi_commands.append(c)
+            self.multi_commands.append(c)
             self.writer.write("+QUEUED\r\n".encode())
             await self.writer.drain()
             return
@@ -570,7 +570,7 @@ class Connection_Object:
         response = "+OK\r\n"
 
         if exec_mode:
-            queued_responses.append(response)
+            self.queued_responses.append(response)
         else:
             if IS_MASTER:
                 self.writer.write(response.encode())
@@ -583,7 +583,7 @@ class Connection_Object:
 
     async def execute_echo_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
-            multi_commands.append(c)
+            self.multi_commands.append(c)
             self.writer.write("+QUEUED\r\n".encode())
             await self.writer.drain()
             return
@@ -593,21 +593,21 @@ class Connection_Object:
         response = f"${len(echo_msg)}\r\n{echo_msg}\r\n"
 
         if exec_mode:
-            queued_responses.append(response)
+            self.queued_responses.append(response)
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
 
     async def execute_ping_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
-            multi_commands.append(c)
+            self.multi_commands.append(c)
             self.writer.write("+QUEUED\r\n".encode())
             await self.writer.drain()
             return
         response = "+PONG\r\n"
 
         if exec_mode:
-            queued_responses.append(response)
+            self.queued_responses.append(response)
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
