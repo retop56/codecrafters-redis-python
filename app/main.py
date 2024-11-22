@@ -283,6 +283,8 @@ class Connection_Object:
         self.in_multi_mode = False
         self.multi_commands: deque["Command"] = deque()
         self.queued_responses: list[str] = []
+        self.waiting = False
+        self.waiting_responses = []
 
     async def execute_discard_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode is False:
@@ -483,6 +485,36 @@ class Connection_Object:
             await self.writer.drain()
         self.update_offset(c.bytes_processed)
 
+    async def execute_wait_command(self, c: Command, exec_mode=False) -> None:
+        print("Executing wait command")
+        if not c.args:
+            raise ValueError(
+                "Can't processed 'WAIT' command with empty args dictionary!"
+            )
+        timeout, num_replicas = c.args["timeout"], c.args["num_replicas"]
+        self.waiting = True
+        response = f":{len(connected_replicas)}\r\n"
+        # current_offset = master_repl_offset
+        # if connected_replicas and current_offset > 0:
+        #     print("First block")
+        #     print(
+        #         f"Current connected replicas: {'\n'.join(str(c) for c in connected_replicas)}"
+        #     )
+        #     print(f"Current offset: {current_offset}")
+        #     for v in connected_replicas.values():
+        #         v.write("*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n".encode())
+        #     await asyncio.sleep(int(timeout) / 1000)
+        #     print(f"Waiting_responses: {self.waiting_responses}")
+        #     self.writer.write(f":{len(self.waiting_responses)}\r\n".encode())
+        #     await self.writer.drain()
+        # else:
+        #     print(
+        #         f"Current connected replicas: {'\n'.join(str(c) for c in connected_replicas)}"
+        #     )
+        self.writer.write(response.encode())
+        await self.writer.drain()
+        self.update_offset(c.bytes_processed)
+
     async def execute_psync_command(self, c: Command, exec_mode=False) -> None:
         self.writer.write(f"+FULLRESYNC {master_replid} 0\r\n".encode())
         await self.writer.drain()
@@ -511,6 +543,9 @@ class Connection_Object:
         self.writer.write(response.encode())
         await self.writer.drain()
         if IS_MASTER:
+            offset_amount = c.args["offset_amount"]
+            if self.waiting and offset_amount:
+                self.waiting_responses.append(offset_amount)
             global connected_replicas
             replica_conn_info = self.writer.get_extra_info("peername")
             print(f"Adding {replica_conn_info} to connected_replicas dict")
@@ -1116,9 +1151,12 @@ class Connection_Object:
         print("Entered handle_wait_command")
         num_replicas, byte_ptr = self.decode_bulk_string(byte_ptr)
         timeout, byte_ptr = self.decode_bulk_string(byte_ptr)
-        # await asyncio.sleep(int(timeout) / 1000)
-        # writer.write(f":{len(connected_replicas)}\r\n".encode())
-        # await writer.drain()
+        c = Command(
+            cb=self.execute_wait_command,
+            bytes_processed=byte_ptr,
+            args={"num_replicas": num_replicas, "timeout": timeout},
+        )
+        commands.append(c)
         return byte_ptr
 
     async def handle_psync_command(self, byte_ptr: int) -> int:
@@ -1141,6 +1179,7 @@ class Connection_Object:
     async def handle_replconf_command(self, byte_ptr: int) -> int:
         s, byte_ptr = self.decode_bulk_string(byte_ptr)
         print(f"matching s in replconf function: {s}")
+        offset_amount = None
         match s:
             case "listening-port":
                 _, byte_ptr = self.decode_bulk_string(byte_ptr)
@@ -1148,10 +1187,14 @@ class Connection_Object:
                 _, byte_ptr = self.decode_bulk_string(byte_ptr)
             case "GETACK":
                 _, byte_ptr = self.decode_bulk_string(byte_ptr)
+            case "ACK":
+                offset_amount, byte_ptr = self.decode_bulk_string(byte_ptr)
             case _:
                 raise ValueError("Unable to process `REPLCONF` command!")
         c = Command(
-            cb=self.execute_replconf_command, bytes_processed=byte_ptr, args={"arg": s}
+            cb=self.execute_replconf_command,
+            bytes_processed=byte_ptr,
+            args={"arg": s, "offset_amount": offset_amount},
         )
         commands.append(c)
         return byte_ptr
