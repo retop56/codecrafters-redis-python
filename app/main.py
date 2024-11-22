@@ -273,6 +273,53 @@ def read_rdb_file_from_disk():
         return
 
 
+async def execute_xread_command(c: Command, writer: asyncio.StreamWriter) -> None:
+    if IN_MULTI_MODE:
+        multi_commands.append(c)
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return
+    if not c.args:
+        raise ValueError("Can't process 'XRANGE' command with empty args dictionary!")
+    result_arr, stream_keys_and_ids = (
+        c.args["result_arr"],
+        c.args["stream_keys_and_ids"],
+    )
+    response = f"*{len(stream_keys_and_ids)}\r\n" + "".join(s for s in result_arr)
+
+    writer.write(response.encode())
+    await writer.drain()
+
+
+async def execute_xrange_command(c: Command, writer: asyncio.StreamWriter) -> None:
+    if IN_MULTI_MODE:
+        multi_commands.append(c)
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return
+    if not c.args:
+        raise ValueError("Can't process 'XRANGE' command with empty args dictionary!")
+    start_id, end_id, stream_key = (
+        c.args["start_id"],
+        c.args["end_id"],
+        c.args["stream_key"],
+    )
+    if start_id == "-":
+        result_arr = xrange_retrieve_entries_without_explicit_start(end_id, stream_key)
+    elif end_id == "+":
+        result_arr = xrange_retrieve_entries_without_explicit_end(start_id, stream_key)
+    else:
+        result_arr = xrange_retrieve_entries_with_explicit_start_and_stop(
+            start_id, end_id, stream_key
+        )
+    print("XRANGE result array (so far):")
+    print(result_arr)
+    response = f"*{len(result_arr)}\r\n" + "".join(r for r in result_arr)
+
+    writer.write(response.encode())
+    await writer.drain()
+
+
 async def execute_xadd_command(c: Command, writer: asyncio.StreamWriter) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
@@ -562,11 +609,11 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     for i in range(1, len(stream_keys_and_ids)):
         entry_id, byte_ptr = decode_bulk_string(byte_ptr)
         stream_keys_and_ids[i] = (*stream_keys_and_ids[i], entry_id)
-    global IN_MULTI_MODE
-    if IN_MULTI_MODE:
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
-        return byte_ptr
+    # global IN_MULTI_MODE
+    # if IN_MULTI_MODE:
+    #     writer.write("+QUEUED\r\n".encode())
+    #     await writer.drain()
+    #     return byte_ptr
     if block_time_ms == "0":
         blocked_command_queue = copy.deepcopy(b_stream)
         b_stream.clear()
@@ -600,9 +647,14 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     result_arr = []
     for e in stream_keys_and_ids:
         result_arr.append(xread_retrieve_entries(*e))
-    result_str = f"*{len(stream_keys_and_ids)}\r\n" + "".join(s for s in result_arr)
-    writer.write(result_str.encode())
-    await writer.drain()
+    c = Command(
+        cb=execute_xread_command,
+        args={"stream_keys_and_ids": stream_keys_and_ids, "result_arr": result_arr},
+    )
+    commands.append(c)
+    # result_str = f"*{len(stream_keys_and_ids)}\r\n" + "".join(s for s in result_arr)
+    # writer.write(result_str.encode())
+    # await writer.drain()
     return byte_ptr
 
 
@@ -665,17 +717,22 @@ async def handle_xread_command(writer: asyncio.StreamWriter, byte_ptr: int) -> i
     for i in range(1, len(stream_keys_and_ids)):
         entry_id, byte_ptr = decode_bulk_string(byte_ptr)
         stream_keys_and_ids[i] = (*stream_keys_and_ids[i], entry_id)
-    global IN_MULTI_MODE
-    if IN_MULTI_MODE:
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
-        return byte_ptr
+    # global IN_MULTI_MODE
+    # if IN_MULTI_MODE:
+    #     writer.write("+QUEUED\r\n".encode())
+    #     await writer.drain()
+    #     return byte_ptr
     result_arr = []
     for e in stream_keys_and_ids:
         result_arr.append(xread_retrieve_entries(*e))
-    result_str = f"*{len(stream_keys_and_ids)}\r\n" + "".join(s for s in result_arr)
-    writer.write(result_str.encode())
-    await writer.drain()
+    c = Command(
+        cb=execute_xread_command,
+        args={"stream_keys_and_ids": stream_keys_and_ids, "result_arr": result_arr},
+    )
+    commands.append(c)
+    # result_str = f"*{len(stream_keys_and_ids)}\r\n" + "".join(s for s in result_arr)
+    # writer.write(result_str.encode())
+    # await writer.drain()
     return byte_ptr
 
 
@@ -755,29 +812,30 @@ def encode_entry_to_array(entry_id: str, val_dict: dict) -> str:
     return result_str
 
 
-async def handle_xrange_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_xrange_command(byte_ptr: int) -> int:
     stream_key, byte_ptr = decode_bulk_string(byte_ptr)
     start_id, byte_ptr = decode_bulk_string(byte_ptr)
     end_id, byte_ptr = decode_bulk_string(byte_ptr)
-    global IN_MULTI_MODE
-    if IN_MULTI_MODE:
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
-        return byte_ptr
-    if start_id == "-":
-        result_arr = xrange_retrieve_entries_without_explicit_start(end_id, stream_key)
-    elif end_id == "+":
-        result_arr = xrange_retrieve_entries_without_explicit_end(start_id, stream_key)
-    else:
-        result_arr = xrange_retrieve_entries_with_explicit_start_and_stop(
-            start_id, end_id, stream_key
-        )
-    print("XRANGE result array (so far):")
-    print(result_arr)
-    final_result = f"*{len(result_arr)}\r\n" + "".join(r for r in result_arr)
-    writer.write(final_result.encode())
-    await writer.drain()
+    c = Command(
+        cb=execute_xrange_command,
+        args={"stream_key": stream_key, "start_id": start_id, "end_id": end_id},
+    )
+    commands.append(c)
     return byte_ptr
+    # if start_id == "-":
+    #     result_arr = xrange_retrieve_entries_without_explicit_start(end_id, stream_key)
+    # elif end_id == "+":
+    #     result_arr = xrange_retrieve_entries_without_explicit_end(start_id, stream_key)
+    # else:
+    #     result_arr = xrange_retrieve_entries_with_explicit_start_and_stop(
+    #         start_id, end_id, stream_key
+    #     )
+    # print("XRANGE result array (so far):")
+    # print(result_arr)
+    # final_result = f"*{len(result_arr)}\r\n" + "".join(r for r in result_arr)
+    # writer.write(final_result.encode())
+    # await writer.drain()
+    # return byte_ptr
 
 
 def xadd_auto_gen_seq_num(time: str, stream_key: str) -> str:
@@ -829,9 +887,7 @@ def gen_time_and_SeqNum_from_entry_id(
     return (time_id, seqNum_id)
 
 
-async def handle_xadd_command(
-    writer: asyncio.StreamWriter, byte_ptr: int, command_length: int
-) -> int:
+async def handle_xadd_command(byte_ptr: int, command_length: int) -> int:
     args = {}
     stream_key, byte_ptr = decode_bulk_string(byte_ptr)
     args["stream_key"] = stream_key
@@ -862,10 +918,6 @@ async def handle_xadd_command(
         args["entry_dict"] = entry_dict
         c = Command(cb=execute_xadd_command, args=args)
         commands.append(c)
-        # stream_entry = StreamValue(entry_dict={new_entry_id: entry_dict})
-        # key_store[stream_key] = stream_entry
-        # writer.write(f"${len(new_entry_id)}\r\n{new_entry_id}\r\n".encode())
-        # await writer.drain()
         return byte_ptr
     # ***************************
     # * Add to exisiting stream *
@@ -880,11 +932,6 @@ async def handle_xadd_command(
     # If the stream is empty, the ID should be greater than 0-0
     if int(time_id) <= 0 and int(seqNum_id) <= 1:
         args["error"] = "-ERR The ID specified in XADD must be greater than 0-0\r\n"
-        # writer.write(
-        #     "-ERR The ID specified in XADD must be greater than 0-0\r\n".encode()
-        # )
-        # await writer.drain()
-        # print("-ERR The ID specified in XADD must be greater than 0-0")
         c = Command(cb=execute_xadd_command, args=args)
         commands.append(c)
         byte_ptr = clear_bad_command(byte_ptr)
@@ -894,15 +941,6 @@ async def handle_xadd_command(
             "-ERR The ID specified in XADD is equal or smaller than "
             "the target stream top item\r\n"
         )
-        # writer.write(
-        #     "-ERR The ID specified in XADD is equal or smaller than "
-        #     "the target stream top item\r\n".encode()
-        # )
-        # await writer.drain()
-        # print(
-        #     "-ERR The ID specified in XADD is equal or smaller "
-        #     "than the target stream top item\r\n"
-        # )
         c = Command(cb=execute_xadd_command, args=args)
         commands.append(c)
         byte_ptr = clear_bad_command(byte_ptr)
@@ -915,15 +953,6 @@ async def handle_xadd_command(
             "-ERR The ID specified in XADD is equal or smaller than "
             "the target stream top item\r\n"
         )
-        # writer.write(
-        #     "-ERR The ID specified in XADD is equal or smaller than "
-        #     "the target stream top item\r\n".encode()
-        # )
-        # await writer.drain()
-        # print(
-        #     "-ERR The ID specified in XADD is equal or smaller "
-        #     "than the target stream top item\r\n"
-        # )
         c = Command(cb=execute_xadd_command, args=args)
         commands.append(c)
         byte_ptr = clear_bad_command(byte_ptr)
@@ -939,15 +968,6 @@ async def handle_xadd_command(
     c = Command(cb=execute_xadd_command, args=args)
     commands.append(c)
     return byte_ptr
-    # for k, v in temp_dict.items():
-    #     if new_entry_id in existing_entry.entry_dict:
-    #         existing_entry.entry_dict[new_entry_id][k] = v
-    #     else:
-    #         existing_entry.entry_dict[new_entry_id] = {k: v}
-
-    writer.write(f"${len(new_entry_id)}\r\n{new_entry_id}\r\n".encode())
-    await writer.drain()
-    return byte_ptr
 
 
 async def handle_type_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
@@ -962,8 +982,8 @@ async def handle_wait_command(writer: asyncio.StreamWriter, byte_ptr: int) -> in
     num_replicas, byte_ptr = decode_bulk_string(byte_ptr)
     timeout, byte_ptr = decode_bulk_string(byte_ptr)
     # await asyncio.sleep(int(timeout) / 1000)
-    writer.write(f":{len(connected_replicas)}\r\n".encode())
-    await writer.drain()
+    # writer.write(f":{len(connected_replicas)}\r\n".encode())
+    # await writer.drain()
     return byte_ptr
 
 
@@ -1036,14 +1056,14 @@ async def handle_info_command(writer: asyncio.StreamWriter, byte_ptr: int) -> in
     return byte_ptr
 
 
-async def handle_keys_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_keys_command(byte_ptr: int) -> int:
     pattern, byte_ptr = decode_bulk_string(byte_ptr)
     c = Command(cb=execute_keys_command, args={"pattern": pattern})
     commands.append(c)
     return byte_ptr
 
 
-async def handle_config_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_config_command(byte_ptr: int) -> int:
     get_command, byte_ptr = decode_bulk_string(byte_ptr)
     if get_command != "GET":
         raise ValueError(
@@ -1180,9 +1200,9 @@ async def decode_array(
             case "get":
                 byte_ptr = await handle_get_command(byte_ptr)
             case "config":
-                byte_ptr = await handle_config_command(writer, byte_ptr)
+                byte_ptr = await handle_config_command(byte_ptr)
             case "keys":
-                byte_ptr = await handle_keys_command(writer, byte_ptr)
+                byte_ptr = await handle_keys_command(byte_ptr)
             case "info":
                 byte_ptr = await handle_info_command(writer, byte_ptr)
             case "replconf":
@@ -1196,9 +1216,9 @@ async def decode_array(
             case "xadd":
                 # subtracting 1 from arr_length to account for 'XADD' bulk string
                 # being processed already
-                byte_ptr = await handle_xadd_command(writer, byte_ptr, arr_length - 1)
+                byte_ptr = await handle_xadd_command(byte_ptr, arr_length - 1)
             case "xrange":
-                byte_ptr = await handle_xrange_command(writer, byte_ptr)
+                byte_ptr = await handle_xrange_command(byte_ptr)
             case "xread":
                 byte_ptr = await handle_xread_command(writer, byte_ptr)
             case "incr":
