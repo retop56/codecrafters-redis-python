@@ -314,7 +314,7 @@ class Connection_Object:
         response = "+OK\r\n"
         if exec_mode:
             self.queued_responses.append(response)
-        else:
+        elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
 
@@ -344,7 +344,7 @@ class Connection_Object:
 
         if exec_mode:
             self.queued_responses.append(response)
-        else:
+        elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
 
@@ -366,7 +366,7 @@ class Connection_Object:
 
         if exec_mode:
             self.queued_responses.append(response)
-        else:
+        elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
 
@@ -403,7 +403,7 @@ class Connection_Object:
 
         if exec_mode:
             self.queued_responses.append(response)
-        else:
+        elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
 
@@ -438,7 +438,7 @@ class Connection_Object:
 
         if exec_mode:
             self.queued_responses.append(response)
-        else:
+        elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
 
@@ -468,6 +468,65 @@ class Connection_Object:
 
         if exec_mode:
             self.queued_responses.append(response)
+        elif IS_MASTER:
+            self.writer.write(response.encode())
+            await self.writer.drain()
+
+    async def execute_psync_command(self, c: Command, exec_mode=False) -> None:
+        self.writer.write(f"+FULLRESYNC {master_replid} 0\r\n".encode())
+        await self.writer.drain()
+        self.writer.write(
+            f"${len(empty_rdb_file_hex)}\r\n".encode() + empty_rdb_file_hex
+        )
+        await self.writer.drain()
+
+    async def execute_replconf_command(self, c: Command, exec_mode=False) -> None:
+        if not c.args:
+            raise ValueError(
+                "Can't process 'REPLCONF' command with empty args dictionary!"
+            )
+        arg = c.args["arg"]
+        if arg == "getack":
+            response = (
+                f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(str(replica_offset))}"
+                f"\r\n{replica_offset}\r\n"
+            )
+        else:
+            response = "+OK\r\n"
+
+        if IS_MASTER:
+            global connected_replicas
+            replica_conn_info = self.writer.get_extra_info("peername")
+            print(f"Adding {replica_conn_info} to connected_replicas dict")
+            connected_replicas[replica_conn_info] = self.writer
+            self.writer.write(response.encode())
+            await self.writer.drain()
+
+    async def execute_info_command(self, c: Command, exec_mode=False) -> None:
+        if self.in_multi_mode:
+            self.multi_commands.append(c)
+            self.writer.write("+QUEUED\r\n".encode())
+            await self.writer.drain()
+            return
+        if not c.args:
+            raise ValueError("Can't process 'INFO' command with empty args dictionary!")
+        info_args = c.args["info_args"]
+        if info_args != "replication":
+            raise ValueError(
+                "Invalid argument to `INFO` command! " f"(Given: {info_args})"
+            )
+        response = ""
+        if IS_MASTER:
+            response += "role:master"
+            response += f"\nmaster_replid:{master_replid}"
+            # response += f"\nmaster_repl_offset:{master_repl_offset}"
+            response += "\nmaster_repl_offset:0"
+        else:
+            response += "role:slave"
+        response = f"${len(response)}\r\n{response}\r\n"
+
+        if exec_mode:
+            self.queued_responses.append(response)
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
@@ -491,7 +550,7 @@ class Connection_Object:
 
         if exec_mode:
             self.queued_responses.append(response)
-        else:
+        elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
 
@@ -518,7 +577,7 @@ class Connection_Object:
 
         if exec_mode:
             self.queued_responses.append(response)
-        else:
+        elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
 
@@ -561,25 +620,36 @@ class Connection_Object:
         if not c.args:
             raise ValueError("Can't process 'SET' command with empty args dictionary!")
         key, val, expiry = c.args["key"], c.args["val"], c.args["expiry"]
+        print(f"Key from args: {key}")
+        print(f"Val from args: {val}")
+        print(f"Expiry from args: {expiry}")
         if val.isdigit():
             entry_val = NumValue(val=int(val), expiry=expiry)
         else:
             entry_val = StringValue(val=val, expiry=expiry)
         key_store[key] = entry_val
-        print(f"Set {key} --> {repr(entry_val)}")
+        print(f"Set {key} --> {repr(entry_val.val)}")
         response = "+OK\r\n"
 
         if exec_mode:
             self.queued_responses.append(response)
-        else:
-            if IS_MASTER:
-                self.writer.write(response.encode())
-                await self.writer.drain()
-                command_to_replicate = f"*3\r\n$3\r\nSET\r\n${len(key)}\r\n"
+        elif IS_MASTER:
+            self.writer.write(response.encode())
+            await self.writer.drain()
+            command_to_replicate = (
+                f"*3\r\n$3\r\nSET\r\n${len(key)}\r\n"
                 f"{key}\r\n${len(val)}\r\n{val}\r\n"
-                global connected_replicas
-                for replica_conn in connected_replicas.values():
-                    replica_conn.write(command_to_replicate.encode())
+            )
+            # command_to_replicate = "test"
+            print(f"String to be replicated: {command_to_replicate}")
+            print(f"Num of connected replicas: {len(connected_replicas)}")
+            print(
+                f"Connected replicas: {'\n'.join(str(c) for c in connected_replicas.keys())}"
+            )
+            for k, v in connected_replicas.items():
+                print(f"Replicating to {k}")
+                v.write(command_to_replicate.encode())
+                await v.drain()
 
     async def execute_echo_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
@@ -594,7 +664,7 @@ class Connection_Object:
 
         if exec_mode:
             self.queued_responses.append(response)
-        else:
+        elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
 
@@ -608,7 +678,7 @@ class Connection_Object:
 
         if exec_mode:
             self.queued_responses.append(response)
-        else:
+        elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
 
@@ -1027,13 +1097,8 @@ class Connection_Object:
                 "Expected `-1` as second argument to `PSYNC` command. "
                 f"Instead, got {s}"
             )
-        self.writer.write(f"+FULLRESYNC {master_replid} 0\r\n".encode())
-        await self.writer.drain()
-        self.writer.write(
-            f"${len(empty_rdb_file_hex)}\r\n".encode() + empty_rdb_file_hex
-        )
-        await self.writer.drain()
-
+        c = Command(cb=self.execute_psync_command)
+        commands.append(c)
         return byte_ptr
 
     async def handle_replconf_command(self, byte_ptr: int) -> int:
@@ -1042,48 +1107,21 @@ class Connection_Object:
         match s.lower():
             case "listening-port":
                 _, byte_ptr = self.decode_bulk_string(byte_ptr)
-                if IS_MASTER:
-                    self.writer.write("+OK\r\n".encode())
-                    await self.writer.drain()
             case "capa":
                 _, byte_ptr = self.decode_bulk_string(byte_ptr)
-                if IS_MASTER:
-                    self.writer.write("+OK\r\n".encode())
-                    await self.writer.drain()
             case "getack":
                 _, byte_ptr = self.decode_bulk_string(byte_ptr)
-                resp = (
-                    f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(str(replica_offset))}"
-                    f"\r\n{replica_offset}\r\n"
-                )
-                self.writer.write(resp.encode())
-                await self.writer.drain()
             case _:
                 raise ValueError("Unable to process `REPLCONF` command!")
-        global connected_replicas
-        if IS_MASTER:
-            replica_conn_info = self.writer.get_extra_info("peername")
-            connected_replicas[replica_conn_info] = self.writer
-
+        c = Command(cb=self.execute_replconf_command, args={"arg": s})
+        commands.append(c)
         return byte_ptr
 
     async def handle_info_command(self, byte_ptr: int) -> int:
         print(f"IS_MASTER = {IS_MASTER}")
         info_args, byte_ptr = self.decode_bulk_string(byte_ptr)
-        if info_args != "replication":
-            raise ValueError(
-                "Invalid argument to `INFO` command! " f"(Given: {info_args})"
-            )
-        s = ""
-        if IS_MASTER:
-            s += "role:master"
-            s += f"\nmaster_replid:{master_replid}"
-            s += f"\nmaster_repl_offset:{master_repl_offset}"
-        else:
-            s += "role:slave"
-        s = f"${len(s)}\r\n{s}\r\n"
-        self.writer.write(s.encode())
-        await self.writer.drain()
+        c = Command(cb=self.execute_info_command, args={"info_args": info_args})
+        commands.append(c)
         return byte_ptr
 
     async def handle_keys_command(self, byte_ptr: int) -> int:
