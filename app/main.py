@@ -286,7 +286,8 @@ class Connection_Object:
             self.writer.write("-ERR EXEC without MULTI\r\n".encode())
             await self.writer.drain()
             return
-        for c in multi_commands:
+        self.in_multi_mode = False
+        while multi_commands:
             multi_c = multi_commands.popleft()
             # callback_args = Command, exec_mode
             await multi_c.cb(multi_c, True)
@@ -294,10 +295,9 @@ class Connection_Object:
         response = f"*{len(queued_responses)}\r\n" + "".join(
             r for r in queued_responses
         )
-
+        queued_responses.clear()
         self.writer.write(response.encode())
         await self.writer.drain()
-        self.in_multi_mode = False
 
     async def execute_multi_command(self, c: Command, exec_mode=False) -> None:
         self.in_multi_mode = True
@@ -557,15 +557,19 @@ class Connection_Object:
             entry_val = StringValue(val=val, expiry=expiry)
         key_store[key] = entry_val
         print(f"Set {key} --> {repr(entry_val)}")
-        if IS_MASTER:
-            self.writer.write("+OK\r\n".encode())
-            await self.writer.drain()
-            command_to_replicate = (
-                f"*3\r\n$3\r\nSET\r\n${len(key)}\r\n{key}\r\n${len(val)}\r\n{val}\r\n"
-            )
-            global connected_replicas
-            for replica_conn in connected_replicas.values():
-                replica_conn.write(command_to_replicate.encode())
+        response = "+OK\r\n"
+
+        if exec_mode:
+            queued_responses.append(response)
+        else:
+            if IS_MASTER:
+                self.writer.write(response.encode())
+                await self.writer.drain()
+                command_to_replicate = f"*3\r\n$3\r\nSET\r\n${len(key)}\r\n"
+                f"{key}\r\n${len(val)}\r\n{val}\r\n"
+                global connected_replicas
+                for replica_conn in connected_replicas.values():
+                    replica_conn.write(command_to_replicate.encode())
 
     async def execute_echo_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
