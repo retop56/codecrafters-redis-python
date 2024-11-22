@@ -40,11 +40,15 @@ empty_rdb_file_hex = bytes.fromhex(
 class Command:
     def __init__(
         self,
-        cb: Callable[["Command", asyncio.StreamWriter], Coroutine],
+        cb: Callable[["Command"], Coroutine],
+        writer: asyncio.StreamWriter,
         args: Optional[dict] = None,
+        reader: Optional[asyncio.StreamReader] = None,
     ) -> None:
-        self.args = args
         self.cb = cb
+        self.writer = writer
+        self.args = args
+        self.reader = reader
 
 
 class HashValue:
@@ -273,11 +277,39 @@ def read_rdb_file_from_disk():
         return
 
 
-async def execute_xread_command(c: Command, writer: asyncio.StreamWriter) -> None:
+async def execute_incr_command(c: Command) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
+        c.writer.write("+QUEUED\r\n".encode())
+        await c.writer.drain()
+        return
+    if not c.args:
+        raise ValueError("Can't process 'INCR' command with empty args dictionary!")
+    key_to_incr = c.args["key"]
+    val_belonging_to_key = key_store.get(key_to_incr)
+    match val_belonging_to_key:
+        case StringValue():
+            response = "-ERR value is not an integer or out of range\r\n"
+        case NumValue():
+            val_belonging_to_key.val += 1
+            response = f":{val_belonging_to_key.val}\r\n"
+        case None:
+            key_store[key_to_incr] = NumValue(val=1, expiry=None)
+            response = ":1\r\n"
+        case _:
+            raise TypeError(
+                f"Cannot increment value of type '{type(val_belonging_to_key).__name__}'"
+            )
+
+    c.writer.write(response.encode())
+    await c.writer.drain()
+
+
+async def execute_xread_command(c: Command) -> None:
+    if IN_MULTI_MODE:
+        multi_commands.append(c)
+        c.writer.write("+QUEUED\r\n".encode())
+        await c.writer.drain()
         return
     if not c.args:
         raise ValueError("Can't process 'XRANGE' command with empty args dictionary!")
@@ -287,15 +319,15 @@ async def execute_xread_command(c: Command, writer: asyncio.StreamWriter) -> Non
     )
     response = f"*{len(stream_keys_and_ids)}\r\n" + "".join(s for s in result_arr)
 
-    writer.write(response.encode())
-    await writer.drain()
+    c.writer.write(response.encode())
+    await c.writer.drain()
 
 
-async def execute_xrange_command(c: Command, writer: asyncio.StreamWriter) -> None:
+async def execute_xrange_command(c: Command) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
+        c.writer.write("+QUEUED\r\n".encode())
+        await c.writer.drain()
         return
     if not c.args:
         raise ValueError("Can't process 'XRANGE' command with empty args dictionary!")
@@ -316,15 +348,15 @@ async def execute_xrange_command(c: Command, writer: asyncio.StreamWriter) -> No
     print(result_arr)
     response = f"*{len(result_arr)}\r\n" + "".join(r for r in result_arr)
 
-    writer.write(response.encode())
-    await writer.drain()
+    c.writer.write(response.encode())
+    await c.writer.drain()
 
 
-async def execute_xadd_command(c: Command, writer: asyncio.StreamWriter) -> None:
+async def execute_xadd_command(c: Command) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
+        c.writer.write("+QUEUED\r\n".encode())
+        await c.writer.drain()
         return
     if not c.args:
         raise ValueError("Can't process 'XADD' command with empty args dictionary!")
@@ -349,15 +381,15 @@ async def execute_xadd_command(c: Command, writer: asyncio.StreamWriter) -> None
                     existing_entry.entry_dict[entry_id] = {k: v}
         response = f"${len(entry_id)}\r\n{entry_id}\r\n"
 
-    writer.write(response.encode())
-    await writer.drain()
+    c.writer.write(response.encode())
+    await c.writer.drain()
 
 
-async def execute_type_command(c: Command, writer: asyncio.StreamWriter) -> None:
+async def execute_type_command(c: Command) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
+        c.writer.write("+QUEUED\r\n".encode())
+        await c.writer.drain()
         return
     if not c.args:
         raise ValueError("Can't process 'TYPE' command with empty args dictionary!")
@@ -377,15 +409,15 @@ async def execute_type_command(c: Command, writer: asyncio.StreamWriter) -> None
                     f"(Key: {key}\nValue: {repr(key_store[key])}"
                 )
 
-    writer.write(response.encode())
-    await writer.drain()
+    c.writer.write(response.encode())
+    await c.writer.drain()
 
 
-async def execute_keys_command(c: Command, writer: asyncio.StreamWriter) -> None:
+async def execute_keys_command(c: Command) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
+        c.writer.write("+QUEUED\r\n".encode())
+        await c.writer.drain()
         return
     if not c.args:
         raise ValueError("Can't process 'KEYS' command with empty args dictionary!")
@@ -398,15 +430,15 @@ async def execute_keys_command(c: Command, writer: asyncio.StreamWriter) -> None
     for k in key_store:
         response += f"${len(k)}\r\n{k}\r\n"
 
-    writer.write(response.encode())
-    await writer.drain()
+    c.writer.write(response.encode())
+    await c.writer.drain()
 
 
-async def execute_config_command(c: Command, writer: asyncio.StreamWriter) -> None:
+async def execute_config_command(c: Command) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
+        c.writer.write("+QUEUED\r\n".encode())
+        await c.writer.drain()
         return
     if not c.args:
         raise ValueError("Can't process 'CONFIG' command with empty args dictionary!")
@@ -421,15 +453,15 @@ async def execute_config_command(c: Command, writer: asyncio.StreamWriter) -> No
         case _:
             raise ValueError("Unable to process 'CONFIG' parameter!")
 
-    writer.write(response.encode())
-    await writer.drain()
+    c.writer.write(response.encode())
+    await c.writer.drain()
 
 
-async def execute_get_command(c: Command, writer: asyncio.StreamWriter) -> None:
+async def execute_get_command(c: Command) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
+        c.writer.write("+QUEUED\r\n".encode())
+        await c.writer.drain()
         return
     if not c.args:
         raise ValueError("Can't process 'GET' command with empty args dictionary!")
@@ -449,15 +481,15 @@ async def execute_get_command(c: Command, writer: asyncio.StreamWriter) -> None:
             case _:
                 raise TypeError("Unable to process get command with given key")
 
-    writer.write(response.encode())
-    await writer.drain()
+    c.writer.write(response.encode())
+    await c.writer.drain()
 
 
-async def execute_set_command(c: Command, writer: asyncio.StreamWriter) -> None:
+async def execute_set_command(c: Command) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
+        c.writer.write("+QUEUED\r\n".encode())
+        await c.writer.drain()
         return
     if not c.args:
         raise ValueError("Can't process 'SET' command with empty args dictionary!")
@@ -469,8 +501,8 @@ async def execute_set_command(c: Command, writer: asyncio.StreamWriter) -> None:
     key_store[key] = entry_val
     print(f"Set {key} --> {repr(entry_val)}")
     if IS_MASTER:
-        writer.write("+OK\r\n".encode())
-        await writer.drain()
+        c.writer.write("+OK\r\n".encode())
+        await c.writer.drain()
         command_to_replicate = (
             f"*3\r\n$3\r\nSET\r\n${len(key)}\r\n{key}\r\n${len(val)}\r\n{val}\r\n"
         )
@@ -479,31 +511,31 @@ async def execute_set_command(c: Command, writer: asyncio.StreamWriter) -> None:
             replica_conn.write(command_to_replicate.encode())
 
 
-async def execute_echo_command(c: Command, writer: asyncio.StreamWriter) -> None:
+async def execute_echo_command(c: Command) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
+        c.writer.write("+QUEUED\r\n".encode())
+        await c.writer.drain()
         return
     if not c.args:
         raise ValueError("Echo command should have an args dictionary in it!")
     echo_msg = c.args["echo_msg"]
     response = f"${len(echo_msg)}\r\n{echo_msg}\r\n"
 
-    writer.write(response.encode())
-    await writer.drain()
+    c.writer.write(response.encode())
+    await c.writer.drain()
 
 
-async def execute_ping_command(c: Command, writer: asyncio.StreamWriter) -> None:
+async def execute_ping_command(c: Command) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
+        c.writer.write("+QUEUED\r\n".encode())
+        await c.writer.drain()
         return
     response = "+PONG\r\n"
 
-    writer.write(response.encode())
-    await writer.drain()
+    c.writer.write(response.encode())
+    await c.writer.drain()
 
 
 def clear_bad_command(byte_ptr: int) -> int:
@@ -537,6 +569,9 @@ async def handle_exec_command(writer: asyncio.StreamWriter) -> None:
 async def handle_multi_command(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter, byte_ptr: int
 ) -> int:
+    c = Command(cb=execute_multi_command, writer=writer, reader=reader)
+    commands.append(c)
+    return byte_ptr
     # print("Handling 'multi' command")
     # global IN_MULTI_MODE
     # if IN_MULTI_MODE is False:
@@ -562,29 +597,37 @@ async def handle_multi_command(
 
 async def handle_incr_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     key_to_incr, byte_ptr = decode_bulk_string(byte_ptr)
-    global IN_MULTI_MODE
-    if IN_MULTI_MODE:
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
-        return byte_ptr
-    val_belonging_to_key = key_store.get(key_to_incr)
-    match val_belonging_to_key:
-        case StringValue():
-            writer.write("-ERR value is not an integer or out of range\r\n".encode())
-            await writer.drain()
-        case NumValue():
-            val_belonging_to_key.val += 1
-            writer.write(f":{val_belonging_to_key.val}\r\n".encode())
-            await writer.drain()
-        case None:
-            key_store[key_to_incr] = NumValue(val=1, expiry=None)
-            writer.write(":1\r\n".encode())
-            await writer.drain()
-        case _:
-            raise TypeError(
-                f"Cannot increment value of type '{type(val_belonging_to_key).__name__}'"
-            )
+    # global IN_MULTI_MODE
+    # if IN_MULTI_MODE:
+    #     writer.write("+QUEUED\r\n".encode())
+    #     await writer.drain()
+    #     return byte_ptr
+    c = Command(
+        cb=execute_incr_command,
+        writer=writer,
+        args={
+            "key": key_to_incr,
+        },
+    )
+    commands.append(c)
     return byte_ptr
+    # match val_belonging_to_key:
+    #     case StringValue():
+    #         writer.write("-ERR value is not an integer or out of range\r\n".encode())
+    #         await writer.drain()
+    #     case NumValue():
+    #         val_belonging_to_key.val += 1
+    #         writer.write(f":{val_belonging_to_key.val}\r\n".encode())
+    #         await writer.drain()
+    #     case None:
+    #         key_store[key_to_incr] = NumValue(val=1, expiry=None)
+    #         writer.write(":1\r\n".encode())
+    #         await writer.drain()
+    #     case _:
+    #         raise TypeError(
+    #             f"Cannot increment value of type '{type(val_belonging_to_key).__name__}'"
+    #         )
+    # return byte_ptr
 
 
 async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
@@ -609,11 +652,6 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     for i in range(1, len(stream_keys_and_ids)):
         entry_id, byte_ptr = decode_bulk_string(byte_ptr)
         stream_keys_and_ids[i] = (*stream_keys_and_ids[i], entry_id)
-    # global IN_MULTI_MODE
-    # if IN_MULTI_MODE:
-    #     writer.write("+QUEUED\r\n".encode())
-    #     await writer.drain()
-    #     return byte_ptr
     if block_time_ms == "0":
         blocked_command_queue = copy.deepcopy(b_stream)
         b_stream.clear()
@@ -649,12 +687,10 @@ async def xread_w_blocking(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
         result_arr.append(xread_retrieve_entries(*e))
     c = Command(
         cb=execute_xread_command,
+        writer=writer,
         args={"stream_keys_and_ids": stream_keys_and_ids, "result_arr": result_arr},
     )
     commands.append(c)
-    # result_str = f"*{len(stream_keys_and_ids)}\r\n" + "".join(s for s in result_arr)
-    # writer.write(result_str.encode())
-    # await writer.drain()
     return byte_ptr
 
 
@@ -717,22 +753,15 @@ async def handle_xread_command(writer: asyncio.StreamWriter, byte_ptr: int) -> i
     for i in range(1, len(stream_keys_and_ids)):
         entry_id, byte_ptr = decode_bulk_string(byte_ptr)
         stream_keys_and_ids[i] = (*stream_keys_and_ids[i], entry_id)
-    # global IN_MULTI_MODE
-    # if IN_MULTI_MODE:
-    #     writer.write("+QUEUED\r\n".encode())
-    #     await writer.drain()
-    #     return byte_ptr
     result_arr = []
     for e in stream_keys_and_ids:
         result_arr.append(xread_retrieve_entries(*e))
     c = Command(
         cb=execute_xread_command,
+        writer=writer,
         args={"stream_keys_and_ids": stream_keys_and_ids, "result_arr": result_arr},
     )
     commands.append(c)
-    # result_str = f"*{len(stream_keys_and_ids)}\r\n" + "".join(s for s in result_arr)
-    # writer.write(result_str.encode())
-    # await writer.drain()
     return byte_ptr
 
 
@@ -812,30 +841,17 @@ def encode_entry_to_array(entry_id: str, val_dict: dict) -> str:
     return result_str
 
 
-async def handle_xrange_command(byte_ptr: int) -> int:
+async def handle_xrange_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     stream_key, byte_ptr = decode_bulk_string(byte_ptr)
     start_id, byte_ptr = decode_bulk_string(byte_ptr)
     end_id, byte_ptr = decode_bulk_string(byte_ptr)
     c = Command(
         cb=execute_xrange_command,
+        writer=writer,
         args={"stream_key": stream_key, "start_id": start_id, "end_id": end_id},
     )
     commands.append(c)
     return byte_ptr
-    # if start_id == "-":
-    #     result_arr = xrange_retrieve_entries_without_explicit_start(end_id, stream_key)
-    # elif end_id == "+":
-    #     result_arr = xrange_retrieve_entries_without_explicit_end(start_id, stream_key)
-    # else:
-    #     result_arr = xrange_retrieve_entries_with_explicit_start_and_stop(
-    #         start_id, end_id, stream_key
-    #     )
-    # print("XRANGE result array (so far):")
-    # print(result_arr)
-    # final_result = f"*{len(result_arr)}\r\n" + "".join(r for r in result_arr)
-    # writer.write(final_result.encode())
-    # await writer.drain()
-    # return byte_ptr
 
 
 def xadd_auto_gen_seq_num(time: str, stream_key: str) -> str:
@@ -887,7 +903,9 @@ def gen_time_and_SeqNum_from_entry_id(
     return (time_id, seqNum_id)
 
 
-async def handle_xadd_command(byte_ptr: int, command_length: int) -> int:
+async def handle_xadd_command(
+    writer: asyncio.StreamWriter, byte_ptr: int, command_length: int
+) -> int:
     args = {}
     stream_key, byte_ptr = decode_bulk_string(byte_ptr)
     args["stream_key"] = stream_key
@@ -916,7 +934,7 @@ async def handle_xadd_command(byte_ptr: int, command_length: int) -> int:
             val, byte_ptr = decode_bulk_string(byte_ptr)
             entry_dict[key] = val
         args["entry_dict"] = entry_dict
-        c = Command(cb=execute_xadd_command, args=args)
+        c = Command(cb=execute_xadd_command, writer=writer, args=args)
         commands.append(c)
         return byte_ptr
     # ***************************
@@ -932,7 +950,7 @@ async def handle_xadd_command(byte_ptr: int, command_length: int) -> int:
     # If the stream is empty, the ID should be greater than 0-0
     if int(time_id) <= 0 and int(seqNum_id) <= 1:
         args["error"] = "-ERR The ID specified in XADD must be greater than 0-0\r\n"
-        c = Command(cb=execute_xadd_command, args=args)
+        c = Command(cb=execute_xadd_command, writer=writer, args=args)
         commands.append(c)
         byte_ptr = clear_bad_command(byte_ptr)
         return byte_ptr
@@ -941,7 +959,7 @@ async def handle_xadd_command(byte_ptr: int, command_length: int) -> int:
             "-ERR The ID specified in XADD is equal or smaller than "
             "the target stream top item\r\n"
         )
-        c = Command(cb=execute_xadd_command, args=args)
+        c = Command(cb=execute_xadd_command, writer=writer, args=args)
         commands.append(c)
         byte_ptr = clear_bad_command(byte_ptr)
         return byte_ptr
@@ -953,7 +971,7 @@ async def handle_xadd_command(byte_ptr: int, command_length: int) -> int:
             "-ERR The ID specified in XADD is equal or smaller than "
             "the target stream top item\r\n"
         )
-        c = Command(cb=execute_xadd_command, args=args)
+        c = Command(cb=execute_xadd_command, writer=writer, args=args)
         commands.append(c)
         byte_ptr = clear_bad_command(byte_ptr)
         return byte_ptr
@@ -965,14 +983,14 @@ async def handle_xadd_command(byte_ptr: int, command_length: int) -> int:
         val, byte_ptr = decode_bulk_string(byte_ptr)
         temp_dict[key] = val
     args["temp_dict"] = temp_dict
-    c = Command(cb=execute_xadd_command, args=args)
+    c = Command(cb=execute_xadd_command, writer=writer, args=args)
     commands.append(c)
     return byte_ptr
 
 
 async def handle_type_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     key, byte_ptr = decode_bulk_string(byte_ptr)
-    c = Command(cb=execute_type_command, args={"key": key})
+    c = Command(cb=execute_type_command, writer=writer, args={"key": key})
     commands.append(c)
     return byte_ptr
 
@@ -1056,14 +1074,14 @@ async def handle_info_command(writer: asyncio.StreamWriter, byte_ptr: int) -> in
     return byte_ptr
 
 
-async def handle_keys_command(byte_ptr: int) -> int:
+async def handle_keys_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     pattern, byte_ptr = decode_bulk_string(byte_ptr)
-    c = Command(cb=execute_keys_command, args={"pattern": pattern})
+    c = Command(cb=execute_keys_command, writer=writer, args={"pattern": pattern})
     commands.append(c)
     return byte_ptr
 
 
-async def handle_config_command(byte_ptr: int) -> int:
+async def handle_config_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     get_command, byte_ptr = decode_bulk_string(byte_ptr)
     if get_command != "GET":
         raise ValueError(
@@ -1072,9 +1090,11 @@ async def handle_config_command(byte_ptr: int) -> int:
     next_command, byte_ptr = decode_bulk_string(byte_ptr)
     match next_command:
         case "dir":
-            c = Command(cb=execute_config_command, args={"param": "dir"})
+            c = Command(cb=execute_config_command, writer=writer, args={"param": "dir"})
         case "dbfilename":
-            c = Command(cb=execute_config_command, args={"param": "dbfilename"})
+            c = Command(
+                cb=execute_config_command, writer=writer, args={"param": "dbfilename"}
+            )
         case _:
             raise ValueError(
                 f"Don't recognize argument to `CONFIG` command. (Given: {next_command})"
@@ -1083,15 +1103,15 @@ async def handle_config_command(byte_ptr: int) -> int:
     return byte_ptr
 
 
-async def handle_get_command(byte_ptr: int) -> int:
+async def handle_get_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     print("Entered 'handle_get_command' function")
     key, byte_ptr = decode_bulk_string(byte_ptr)
-    c = Command(cb=execute_get_command, args={"key": key})
+    c = Command(cb=execute_get_command, writer=writer, args={"key": key})
     commands.append(c)
     return byte_ptr
 
 
-async def handle_set_command(byte_ptr: int) -> int:
+async def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     key, byte_ptr = decode_bulk_string(byte_ptr)
     val, byte_ptr = decode_bulk_string(byte_ptr)
     print(f"Decoded key-val: {key} --> {val}")
@@ -1109,22 +1129,24 @@ async def handle_set_command(byte_ptr: int) -> int:
     except (NotEnoughBytesToProcessCommand, ValueError):
         expiry_time = None
     c = Command(
-        cb=execute_set_command, args={"key": key, "val": val, "expiry": expiry_time}
+        cb=execute_set_command,
+        writer=writer,
+        args={"key": key, "val": val, "expiry": expiry_time},
     )
     commands.append(c)
     return byte_ptr
 
 
-async def handle_echo_command(byte_ptr: int) -> int:
+async def handle_echo_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     print(f"Byte_ptr position when entering echo command: {byte_ptr}")
     response, byte_ptr = decode_bulk_string(byte_ptr)
-    c = Command(cb=execute_echo_command, args={"echo_msg": response})
+    c = Command(cb=execute_echo_command, writer=writer, args={"echo_msg": response})
     commands.append(c)
     return byte_ptr
 
 
-async def handle_pong_command() -> None:
-    c = Command(cb=execute_ping_command)
+async def handle_pong_command(writer: asyncio.StreamWriter) -> None:
+    c = Command(cb=execute_ping_command, writer=writer)
     commands.append(c)
 
 
@@ -1192,17 +1214,17 @@ async def decode_array(
         print(f"Returned bulk string for decoding array: {s}")
         match s.lower():
             case "ping":
-                await handle_pong_command()
+                await handle_pong_command(writer)
             case "echo":
-                byte_ptr = await handle_echo_command(byte_ptr)
+                byte_ptr = await handle_echo_command(writer, byte_ptr)
             case "set":
-                byte_ptr = await handle_set_command(byte_ptr)
+                byte_ptr = await handle_set_command(writer, byte_ptr)
             case "get":
-                byte_ptr = await handle_get_command(byte_ptr)
+                byte_ptr = await handle_get_command(writer, byte_ptr)
             case "config":
-                byte_ptr = await handle_config_command(byte_ptr)
+                byte_ptr = await handle_config_command(writer, byte_ptr)
             case "keys":
-                byte_ptr = await handle_keys_command(byte_ptr)
+                byte_ptr = await handle_keys_command(writer, byte_ptr)
             case "info":
                 byte_ptr = await handle_info_command(writer, byte_ptr)
             case "replconf":
@@ -1216,9 +1238,9 @@ async def decode_array(
             case "xadd":
                 # subtracting 1 from arr_length to account for 'XADD' bulk string
                 # being processed already
-                byte_ptr = await handle_xadd_command(byte_ptr, arr_length - 1)
+                byte_ptr = await handle_xadd_command(writer, byte_ptr, arr_length - 1)
             case "xrange":
-                byte_ptr = await handle_xrange_command(byte_ptr)
+                byte_ptr = await handle_xrange_command(writer, byte_ptr)
             case "xread":
                 byte_ptr = await handle_xread_command(writer, byte_ptr)
             case "incr":
@@ -1237,7 +1259,7 @@ async def decode_array(
         update_offset(byte_ptr)
         byte_ptr = 0
         c = commands.pop()
-        await c.cb(c, writer)
+        await c.cb(c)
 
 
 async def connection_handler(
