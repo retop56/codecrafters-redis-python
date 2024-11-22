@@ -39,10 +39,12 @@ class Command:
     def __init__(
         self,
         cb: Callable[["Command", bool], Coroutine],
+        bytes_processed: int,
         args: Optional[dict] = None,
     ) -> None:
         self.cb = cb
         self.args = args
+        self.bytes_processed = bytes_processed
 
 
 class HashValue:
@@ -100,6 +102,7 @@ class NotEnoughBytesToProcessCommand(Exception):
 
 
 if args.replicaof:
+    print("Args.replicaof is set, IS_MASTER is false")
     IS_MASTER = False
     replica_offset = 0
 else:
@@ -290,6 +293,7 @@ class Connection_Object:
         self.writer.write("+OK\r\n".encode())
         await self.writer.drain()
         self.in_multi_mode = False
+        self.update_offset(c.bytes_processed)
 
     async def execute_exec_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode is False:
@@ -308,6 +312,7 @@ class Connection_Object:
         self.queued_responses.clear()
         self.writer.write(response.encode())
         await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_multi_command(self, c: Command, exec_mode=False) -> None:
         self.in_multi_mode = True
@@ -317,6 +322,7 @@ class Connection_Object:
         elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_incr_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
@@ -347,6 +353,7 @@ class Connection_Object:
         elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_xread_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
@@ -369,6 +376,7 @@ class Connection_Object:
         elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_xrange_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
@@ -406,6 +414,7 @@ class Connection_Object:
         elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_xadd_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
@@ -441,6 +450,7 @@ class Connection_Object:
         elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_type_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
@@ -471,6 +481,7 @@ class Connection_Object:
         elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_psync_command(self, c: Command, exec_mode=False) -> None:
         self.writer.write(f"+FULLRESYNC {master_replid} 0\r\n".encode())
@@ -479,28 +490,32 @@ class Connection_Object:
             f"${len(empty_rdb_file_hex)}\r\n".encode() + empty_rdb_file_hex
         )
         await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_replconf_command(self, c: Command, exec_mode=False) -> None:
+        print("Executing replconf command")
         if not c.args:
             raise ValueError(
                 "Can't process 'REPLCONF' command with empty args dictionary!"
             )
         arg = c.args["arg"]
-        if arg == "getack":
+        if arg == "GETACK" and IS_MASTER is False:
             response = (
                 f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(str(replica_offset))}"
                 f"\r\n{replica_offset}\r\n"
             )
+            # response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n"
         else:
             response = "+OK\r\n"
 
+        self.writer.write(response.encode())
+        await self.writer.drain()
         if IS_MASTER:
             global connected_replicas
             replica_conn_info = self.writer.get_extra_info("peername")
             print(f"Adding {replica_conn_info} to connected_replicas dict")
             connected_replicas[replica_conn_info] = self.writer
-            self.writer.write(response.encode())
-            await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_info_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
@@ -530,6 +545,7 @@ class Connection_Object:
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_keys_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
@@ -553,6 +569,7 @@ class Connection_Object:
         elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_config_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
@@ -580,6 +597,7 @@ class Connection_Object:
         elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_get_command(self, c: Command, exec_mode=False) -> None:
         print("Executing get command")
@@ -612,6 +630,7 @@ class Connection_Object:
         else:
             self.writer.write(response.encode())
             await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_set_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
@@ -651,6 +670,7 @@ class Connection_Object:
                 print(f"Replicating to {k}")
                 v.write(command_to_replicate.encode())
                 await v.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_echo_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
@@ -668,6 +688,7 @@ class Connection_Object:
         elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     async def execute_ping_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode:
@@ -682,6 +703,7 @@ class Connection_Object:
         elif IS_MASTER:
             self.writer.write(response.encode())
             await self.writer.drain()
+        self.update_offset(c.bytes_processed)
 
     def clear_bad_command(self, byte_ptr: int) -> int:
         for _ in range(byte_ptr):
@@ -698,16 +720,16 @@ class Connection_Object:
             global master_repl_offset
             master_repl_offset += byte_ptr
 
-    async def handle_discard_command(self) -> None:
-        c = Command(cb=self.execute_discard_command)
+    async def handle_discard_command(self, byte_ptr: int) -> None:
+        c = Command(cb=self.execute_discard_command, bytes_processed=byte_ptr)
         commands.append(c)
 
-    async def handle_exec_command(self) -> None:
-        c = Command(cb=self.execute_exec_command)
+    async def handle_exec_command(self, byte_ptr: int) -> None:
+        c = Command(cb=self.execute_exec_command, bytes_processed=byte_ptr)
         commands.append(c)
 
     async def handle_multi_command(self, byte_ptr: int) -> int:
-        c = Command(cb=self.execute_multi_command)
+        c = Command(cb=self.execute_multi_command, bytes_processed=byte_ptr)
         commands.append(c)
         return byte_ptr
 
@@ -715,6 +737,7 @@ class Connection_Object:
         key_to_incr, byte_ptr = self.decode_bulk_string(byte_ptr)
         c = Command(
             cb=self.execute_incr_command,
+            bytes_processed=byte_ptr,
             args={
                 "key": key_to_incr,
             },
@@ -779,6 +802,7 @@ class Connection_Object:
             result_arr.append(self.xread_retrieve_entries(*e))
         c = Command(
             cb=self.execute_xread_command,
+            bytes_processed=byte_ptr,
             args={"stream_keys_and_ids": stream_keys_and_ids, "result_arr": result_arr},
         )
         commands.append(c)
@@ -847,6 +871,7 @@ class Connection_Object:
             result_arr.append(self.xread_retrieve_entries(*e))
         c = Command(
             cb=self.execute_xread_command,
+            bytes_processed=byte_ptr,
             args={"stream_keys_and_ids": stream_keys_and_ids, "result_arr": result_arr},
         )
         commands.append(c)
@@ -932,6 +957,7 @@ class Connection_Object:
         end_id, byte_ptr = self.decode_bulk_string(byte_ptr)
         c = Command(
             cb=self.execute_xrange_command,
+            bytes_processed=byte_ptr,
             args={"stream_key": stream_key, "start_id": start_id, "end_id": end_id},
         )
         commands.append(c)
@@ -1017,7 +1043,9 @@ class Connection_Object:
                 val, byte_ptr = self.decode_bulk_string(byte_ptr)
                 entry_dict[key] = val
             args["entry_dict"] = entry_dict
-            c = Command(cb=self.execute_xadd_command, args=args)
+            c = Command(
+                cb=self.execute_xadd_command, bytes_processed=byte_ptr, args=args
+            )
             commands.append(c)
             return byte_ptr
         # ***************************
@@ -1033,7 +1061,9 @@ class Connection_Object:
         # If the stream is empty, the ID should be greater than 0-0
         if int(time_id) <= 0 and int(seqNum_id) <= 1:
             args["error"] = "-ERR The ID specified in XADD must be greater than 0-0\r\n"
-            c = Command(cb=self.execute_xadd_command, args=args)
+            c = Command(
+                cb=self.execute_xadd_command, bytes_processed=byte_ptr, args=args
+            )
             commands.append(c)
             byte_ptr = self.clear_bad_command(byte_ptr)
             return byte_ptr
@@ -1042,7 +1072,9 @@ class Connection_Object:
                 "-ERR The ID specified in XADD is equal or smaller than "
                 "the target stream top item\r\n"
             )
-            c = Command(cb=self.execute_xadd_command, args=args)
+            c = Command(
+                cb=self.execute_xadd_command, bytes_processed=byte_ptr, args=args
+            )
             commands.append(c)
             byte_ptr = self.clear_bad_command(byte_ptr)
             return byte_ptr
@@ -1054,7 +1086,9 @@ class Connection_Object:
                 "-ERR The ID specified in XADD is equal or smaller than "
                 "the target stream top item\r\n"
             )
-            c = Command(cb=self.execute_xadd_command, args=args)
+            c = Command(
+                cb=self.execute_xadd_command, bytes_processed=byte_ptr, args=args
+            )
             commands.append(c)
             byte_ptr = self.clear_bad_command(byte_ptr)
             return byte_ptr
@@ -1066,13 +1100,15 @@ class Connection_Object:
             val, byte_ptr = self.decode_bulk_string(byte_ptr)
             temp_dict[key] = val
         args["temp_dict"] = temp_dict
-        c = Command(cb=self.execute_xadd_command, args=args)
+        c = Command(cb=self.execute_xadd_command, bytes_processed=byte_ptr, args=args)
         commands.append(c)
         return byte_ptr
 
     async def handle_type_command(self, byte_ptr: int) -> int:
         key, byte_ptr = self.decode_bulk_string(byte_ptr)
-        c = Command(cb=self.execute_type_command, args={"key": key})
+        c = Command(
+            cb=self.execute_type_command, bytes_processed=byte_ptr, args={"key": key}
+        )
         commands.append(c)
         return byte_ptr
 
@@ -1098,36 +1134,46 @@ class Connection_Object:
                 "Expected `-1` as second argument to `PSYNC` command. "
                 f"Instead, got {s}"
             )
-        c = Command(cb=self.execute_psync_command)
+        c = Command(cb=self.execute_psync_command, bytes_processed=byte_ptr)
         commands.append(c)
         return byte_ptr
 
     async def handle_replconf_command(self, byte_ptr: int) -> int:
         s, byte_ptr = self.decode_bulk_string(byte_ptr)
         print(f"matching s in replconf function: {s}")
-        match s.lower():
+        match s:
             case "listening-port":
                 _, byte_ptr = self.decode_bulk_string(byte_ptr)
             case "capa":
                 _, byte_ptr = self.decode_bulk_string(byte_ptr)
-            case "getack":
+            case "GETACK":
                 _, byte_ptr = self.decode_bulk_string(byte_ptr)
             case _:
                 raise ValueError("Unable to process `REPLCONF` command!")
-        c = Command(cb=self.execute_replconf_command, args={"arg": s})
+        c = Command(
+            cb=self.execute_replconf_command, bytes_processed=byte_ptr, args={"arg": s}
+        )
         commands.append(c)
         return byte_ptr
 
     async def handle_info_command(self, byte_ptr: int) -> int:
         print(f"IS_MASTER = {IS_MASTER}")
         info_args, byte_ptr = self.decode_bulk_string(byte_ptr)
-        c = Command(cb=self.execute_info_command, args={"info_args": info_args})
+        c = Command(
+            cb=self.execute_info_command,
+            bytes_processed=byte_ptr,
+            args={"info_args": info_args},
+        )
         commands.append(c)
         return byte_ptr
 
     async def handle_keys_command(self, byte_ptr: int) -> int:
         pattern, byte_ptr = self.decode_bulk_string(byte_ptr)
-        c = Command(cb=self.execute_keys_command, args={"pattern": pattern})
+        c = Command(
+            cb=self.execute_keys_command,
+            bytes_processed=byte_ptr,
+            args={"pattern": pattern},
+        )
         commands.append(c)
         return byte_ptr
 
@@ -1141,10 +1187,15 @@ class Connection_Object:
         next_command, byte_ptr = self.decode_bulk_string(byte_ptr)
         match next_command:
             case "dir":
-                c = Command(cb=self.execute_config_command, args={"param": "dir"})
+                c = Command(
+                    cb=self.execute_config_command,
+                    bytes_processed=byte_ptr,
+                    args={"param": "dir"},
+                )
             case "dbfilename":
                 c = Command(
                     cb=self.execute_config_command,
+                    bytes_processed=byte_ptr,
                     args={"param": "dbfilename"},
                 )
             case _:
@@ -1157,7 +1208,9 @@ class Connection_Object:
     async def handle_get_command(self, byte_ptr: int) -> int:
         print("Entered 'handle_get_command' function")
         key, byte_ptr = self.decode_bulk_string(byte_ptr)
-        c = Command(cb=self.execute_get_command, args={"key": key})
+        c = Command(
+            cb=self.execute_get_command, bytes_processed=byte_ptr, args={"key": key}
+        )
         print(f"Key is '{key}'")
         commands.append(c)
         return byte_ptr
@@ -1181,6 +1234,7 @@ class Connection_Object:
             expiry_time = None
         c = Command(
             cb=self.execute_set_command,
+            bytes_processed=byte_ptr,
             args={"key": key, "val": val, "expiry": expiry_time},
         )
         commands.append(c)
@@ -1189,12 +1243,16 @@ class Connection_Object:
     async def handle_echo_command(self, byte_ptr: int) -> int:
         print(f"Byte_ptr position when entering echo command: {byte_ptr}")
         response, byte_ptr = self.decode_bulk_string(byte_ptr)
-        c = Command(cb=self.execute_echo_command, args={"echo_msg": response})
+        c = Command(
+            cb=self.execute_echo_command,
+            bytes_processed=byte_ptr,
+            args={"echo_msg": response},
+        )
         commands.append(c)
         return byte_ptr
 
-    async def handle_pong_command(self) -> None:
-        c = Command(cb=self.execute_ping_command)
+    async def handle_pong_command(self, byte_ptr: int) -> None:
+        c = Command(cb=self.execute_ping_command, bytes_processed=byte_ptr)
         commands.append(c)
 
     def decode_bulk_string(self, byte_ptr: int) -> tuple[str, int]:
@@ -1259,7 +1317,7 @@ class Connection_Object:
             print(f"Returned bulk string for decoding array: {s}")
             match s.lower():
                 case "ping":
-                    await self.handle_pong_command()
+                    await self.handle_pong_command(byte_ptr)
                 case "echo":
                     byte_ptr = await self.handle_echo_command(byte_ptr)
                 case "set":
@@ -1293,16 +1351,16 @@ class Connection_Object:
                 case "multi":
                     byte_ptr = await self.handle_multi_command(byte_ptr)
                 case "exec":
-                    await self.handle_exec_command()
+                    await self.handle_exec_command(byte_ptr)
                 case "discard":
-                    await self.handle_discard_command()
+                    await self.handle_discard_command(byte_ptr)
                 case _:
                     raise ValueError(f"Unrecognized command: {s}")
             for _ in range(byte_ptr):
                 if not b_stream:
                     break
                 b_stream.popleft()
-            self.update_offset(byte_ptr)
+            # self.update_offset(byte_ptr)
             byte_ptr = 0
             try:
                 c = commands.pop()
