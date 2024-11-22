@@ -281,6 +281,16 @@ class Connection_Object:
         self.writer = writer
         self.in_multi_mode = False
 
+    async def execute_discard_command(self, c: Command, exec_mode=False) -> None:
+        if self.in_multi_mode is False:
+            self.writer.write("-ERR DISCARD without MULTI\r\n".encode())
+            return
+        multi_commands.clear()
+        queued_responses.clear()
+        self.writer.write("+OK\r\n".encode())
+        await self.writer.drain()
+        self.in_multi_mode = False
+
     async def execute_exec_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode is False:
             self.writer.write("-ERR EXEC without MULTI\r\n".encode())
@@ -617,15 +627,11 @@ class Connection_Object:
             global master_repl_offset
             master_repl_offset += byte_ptr
 
+    async def handle_discard_command(self) -> None:
+        c = Command(cb=self.execute_discard_command)
+        commands.append(c)
+
     async def handle_exec_command(self) -> None:
-        # global IN_MULTI_MODE
-        # if IN_MULTI_MODE is False:
-        #     writer.write("-ERR EXEC without MULTI\r\n".encode())
-        #     await writer.drain()
-        #     return
-        # IN_MULTI_MODE = False
-        # writer.write("*0\r\n".encode())
-        # await writer.drain()
         c = Command(cb=self.execute_exec_command)
         commands.append(c)
 
@@ -633,34 +639,9 @@ class Connection_Object:
         c = Command(cb=self.execute_multi_command)
         commands.append(c)
         return byte_ptr
-        # print("Handling 'multi' command")
-        # global IN_MULTI_MODE
-        # if IN_MULTI_MODE is False:
-        #     IN_MULTI_MODE = True
-        #     writer.write("+OK\r\n".encode())
-        #     await writer.drain()
-        #     # Clear out 'multi' command from command deque
-        #     global b_stream
-        #     for _ in range(byte_ptr):
-        #         if not b_stream:
-        #             break
-        #         b_stream.popleft()
-        #     # Add anything else after 'multi' command to <queued_commands>
-        #     multi_commands.extend(b_stream)
-        #     b_stream.clear()
-        #     # await multi_mode_handler(reader, writer)
-        #     update_offset(byte_ptr)
-        return 0
-
-    # raise ValueError("Already in 'multi' mode!")
 
     async def handle_incr_command(self, byte_ptr: int) -> int:
         key_to_incr, byte_ptr = self.decode_bulk_string(byte_ptr)
-        # global IN_MULTI_MODE
-        # if IN_MULTI_MODE:
-        #     writer.write("+QUEUED\r\n".encode())
-        #     await writer.drain()
-        #     return byte_ptr
         c = Command(
             cb=self.execute_incr_command,
             args={
@@ -669,23 +650,6 @@ class Connection_Object:
         )
         commands.append(c)
         return byte_ptr
-        # match val_belonging_to_key:
-        #     case StringValue():
-        #         writer.write("-ERR value is not an integer or out of range\r\n".encode())
-        #         await writer.drain()
-        #     case NumValue():
-        #         val_belonging_to_key.val += 1
-        #         writer.write(f":{val_belonging_to_key.val}\r\n".encode())
-        #         await writer.drain()
-        #     case None:
-        #         key_store[key_to_incr] = NumValue(val=1, expiry=None)
-        #         writer.write(":1\r\n".encode())
-        #         await writer.drain()
-        #     case _:
-        #         raise TypeError(
-        #             f"Cannot increment value of type '{type(val_belonging_to_key).__name__}'"
-        #         )
-        # return byte_ptr
 
     async def xread_w_blocking(self, byte_ptr: int) -> int:
         regex_for_entry_id = re.compile(r"\d+-\d+")
@@ -1290,6 +1254,8 @@ class Connection_Object:
                     byte_ptr = await self.handle_multi_command(byte_ptr)
                 case "exec":
                     await self.handle_exec_command()
+                case "discard":
+                    await self.handle_discard_command()
                 case _:
                     raise ValueError(f"Unrecognized command: {s}")
             for _ in range(byte_ptr):
