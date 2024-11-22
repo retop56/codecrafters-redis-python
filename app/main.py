@@ -273,11 +273,116 @@ def read_rdb_file_from_disk():
         return
 
 
+async def execute_keys_command(c: Command, writer: asyncio.StreamWriter) -> None:
+    if IN_MULTI_MODE:
+        multi_commands.append(c)
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return
+    if not c.args:
+        raise ValueError("Can't process 'KEYS' command with empty args dictionary!")
+    pattern = c.args["pattern"]
+    if pattern != "*":
+        raise ValueError(
+            f"Can only handle '*' argument to keys command! " f"(Given: {pattern})"
+        )
+    response = f"*{len(key_store)}\r\n"
+    for k in key_store:
+        response += f"${len(k)}\r\n{k}\r\n"
+
+    writer.write(response.encode())
+    await writer.drain()
+
+
+async def execute_config_command(c: Command, writer: asyncio.StreamWriter) -> None:
+    if IN_MULTI_MODE:
+        multi_commands.append(c)
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return
+    if not c.args:
+        raise ValueError("Can't process 'CONFIG' command with empty args dictionary!")
+    match c.args["param"]:
+        case "dir":
+            response = f"*2\r\n$3\r\ndir\r\n${len(args.dir)}\r\n{args.dir}\r\n"
+        case "dbfilename":
+            response = (
+                f"*2\r\n$10\r\ndbfilename\r\n${len(args.dbfilename)}"
+                f"\r\n{args.dbfilename}\r\n"
+            )
+        case _:
+            raise ValueError("Unable to process 'CONFIG' parameter!")
+
+    writer.write(response.encode())
+    await writer.drain()
+
+
+async def execute_get_command(c: Command, writer: asyncio.StreamWriter) -> None:
+    if IN_MULTI_MODE:
+        multi_commands.append(c)
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return
+    if not c.args:
+        raise ValueError("Can't process 'GET' command with empty args dictionary!")
+    key = c.args["key"]
+    if key not in key_store:
+        response = "$-1\r\n"
+    else:
+        entry = key_store[key]
+        match entry:
+            case StringValue() | NumValue():
+                if entry.expiry is None:
+                    response = entry.str_repr_of_val()
+                elif time.time() > entry.expiry:
+                    response = "$-1\r\n"
+                else:
+                    response = entry.str_repr_of_val()
+            case _:
+                raise TypeError("Unable to process get command with given key")
+
+    writer.write(response.encode())
+    await writer.drain()
+
+
+async def execute_set_command(c: Command, writer: asyncio.StreamWriter) -> None:
+    if IN_MULTI_MODE:
+        multi_commands.append(c)
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return
+    if not c.args:
+        raise ValueError("Can't process 'SET' command with empty args dictionary!")
+    key, val, expiry = c.args["key"], c.args["val"], c.args["expiry"]
+    if val.isdigit():
+        entry_val = NumValue(val=int(val), expiry=expiry)
+    else:
+        entry_val = StringValue(val=val, expiry=expiry)
+    key_store[key] = entry_val
+    print(f"Set {key} --> {repr(entry_val)}")
+    if IS_MASTER:
+        writer.write("+OK\r\n".encode())
+        await writer.drain()
+        command_to_replicate = (
+            f"*3\r\n$3\r\nSET\r\n${len(key)}\r\n{key}\r\n${len(val)}\r\n{val}\r\n"
+        )
+        global connected_replicas
+        for replica_conn in connected_replicas.values():
+            replica_conn.write(command_to_replicate.encode())
+
+
 async def execute_echo_command(c: Command, writer: asyncio.StreamWriter) -> None:
+    if IN_MULTI_MODE:
+        multi_commands.append(c)
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return
     if not c.args:
         raise ValueError("Echo command should have an args dictionary in it!")
     echo_msg = c.args["echo_msg"]
-    writer.write(f"${len(echo_msg)}\r\n{echo_msg}\r\n".encode())
+    response = f"${len(echo_msg)}\r\n{echo_msg}\r\n"
+
+    writer.write(response.encode())
     await writer.drain()
 
 
@@ -287,9 +392,10 @@ async def execute_ping_command(c: Command, writer: asyncio.StreamWriter) -> None
         writer.write("+QUEUED\r\n".encode())
         await writer.drain()
         return
-    writer.write("+PONG\r\n".encode())
+    response = "+PONG\r\n"
+
+    writer.write(response.encode())
     await writer.drain()
-    return
 
 
 def clear_bad_command(byte_ptr: int) -> int:
@@ -858,16 +964,9 @@ async def handle_info_command(writer: asyncio.StreamWriter, byte_ptr: int) -> in
 
 
 async def handle_keys_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
-    c, byte_ptr = decode_bulk_string(byte_ptr)
-    if c != "*":
-        raise ValueError(
-            f"Can only handle '*' argument to keys command! " f"(Given: {c})"
-        )
-    s = f"*{len(key_store)}\r\n"
-    for k in key_store:
-        s += f"${len(k)}\r\n{k}\r\n"
-    writer.write(s.encode())
-    await writer.drain()
+    pattern, byte_ptr = decode_bulk_string(byte_ptr)
+    c = Command(cb=execute_keys_command, args={"pattern": pattern})
+    commands.append(c)
     return byte_ptr
 
 
@@ -878,62 +977,33 @@ async def handle_config_command(writer: asyncio.StreamWriter, byte_ptr: int) -> 
             f"'CONFIG' needs to be followed by 'GET'.\n" f"Instead, got {get_command}"
         )
     next_command, byte_ptr = decode_bulk_string(byte_ptr)
-    global IN_MULTI_MODE
-    if IN_MULTI_MODE:
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
-        return byte_ptr
+    # global IN_MULTI_MODE
+    # if IN_MULTI_MODE:
+    #     writer.write("+QUEUED\r\n".encode())
+    #     await writer.drain()
+    #     return byte_ptr
     match next_command:
         case "dir":
-            response = f"*2\r\n$3\r\ndir\r\n${len(args.dir)}\r\n{args.dir}\r\n"
-            writer.write(response.encode())
-            await writer.drain()
-            return byte_ptr
+            c = Command(cb=execute_config_command, args={"param": "dir"})
         case "dbfilename":
-            response = (
-                f"*2\r\n$10\r\ndbfilename\r\n"
-                f"${len(args.dbfilename)}\r\n{args.dbfilename}\r\n"
-            )
-            writer.write(response.encode())
-            await writer.drain()
-            return byte_ptr
+            c = Command(cb=execute_config_command, args={"param": "dbfilename"})
         case _:
             raise ValueError(
                 f"Don't recognize argument to `CONFIG` command. (Given: {next_command})"
             )
+    commands.append(c)
+    return byte_ptr
 
 
-async def handle_get_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_get_command(byte_ptr: int) -> int:
     print("Entered 'handle_get_command' function")
     key, byte_ptr = decode_bulk_string(byte_ptr)
-    global IN_MULTI_MODE
-    if IN_MULTI_MODE:
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
-        return byte_ptr
-    if key not in key_store:
-        writer.write("$-1\r\n".encode())
-        await writer.drain()
-        return byte_ptr
-    entry = key_store[key]
-    match entry:
-        case StringValue() | NumValue():
-            if entry.expiry is None:
-                writer.write(entry.str_repr_of_val().encode())
-                await writer.drain()
-                return byte_ptr
-            if time.time() > entry.expiry:
-                writer.write("$-1\r\n".encode())
-                await writer.drain()
-                return byte_ptr
-            writer.write(entry.str_repr_of_val().encode())
-            await writer.drain()
-            return byte_ptr
-        case _:
-            raise TypeError("Unable to process get command with given key")
+    c = Command(cb=execute_get_command, args={"key": key})
+    commands.append(c)
+    return byte_ptr
 
 
-async def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_set_command(byte_ptr: int) -> int:
     key, byte_ptr = decode_bulk_string(byte_ptr)
     val, byte_ptr = decode_bulk_string(byte_ptr)
     print(f"Decoded key-val: {key} --> {val}")
@@ -950,46 +1020,23 @@ async def handle_set_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int
             expiry_time = None
     except (NotEnoughBytesToProcessCommand, ValueError):
         expiry_time = None
-    if val.isdigit():
-        entry_val = NumValue(val=int(val), expiry=expiry_time)
-    else:
-        entry_val = StringValue(val=val, expiry=expiry_time)
-    global IN_MULTI_MODE
-    if IN_MULTI_MODE:
-        writer.write("+QUEUED\r\n".encode())
-        await writer.drain()
-        return byte_ptr
-    key_store[key] = entry_val
-    print(f"Set {key} --> {repr(entry_val)}")
-    if IS_MASTER:
-        writer.write("+OK\r\n".encode())
-        await writer.drain()
-        command_to_replicate = (
-            f"*3\r\n$3\r\nSET\r\n${len(key)}\r\n{key}\r\n${len(val)}\r\n{val}\r\n"
-        )
-        global connected_replicas
-        for replica_conn in connected_replicas.values():
-            replica_conn.write(command_to_replicate.encode())
-
+    c = Command(
+        cb=execute_set_command, args={"key": key, "val": val, "expiry": expiry_time}
+    )
+    commands.append(c)
     return byte_ptr
 
 
-async def handle_echo_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
+async def handle_echo_command(byte_ptr: int) -> int:
     print(f"Byte_ptr position when entering echo command: {byte_ptr}")
     response, byte_ptr = decode_bulk_string(byte_ptr)
     c = Command(cb=execute_echo_command, args={"echo_msg": response})
-    if IN_MULTI_MODE:
-        multi_commands.append(c)
-        return byte_ptr
     commands.append(c)
     return byte_ptr
 
 
 async def handle_pong_command() -> None:
     c = Command(cb=execute_ping_command)
-    if IN_MULTI_MODE:
-        multi_commands.append(c)
-        return
     commands.append(c)
 
 
@@ -1031,19 +1078,6 @@ def decode_bulk_string(byte_ptr: int) -> tuple[str, int]:
         raise NotEnoughBytesToProcessCommand("decode_bulk_string")
 
 
-# async def multi_mode_handler(
-#     reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-# ) -> None:
-#     print("Inside multi-mode handler")
-#     byte_ptr = 0
-#     while True:
-#         data = await reader.read(100)
-#         global multi_commands
-#         multi_commands.extend(data.decode())
-#         s, byte_ptr = decode_bulk_string(byte_ptr, multi_mode=True)
-#         if multi_commands[byte_ptr] != "*":
-
-
 async def decode_array(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> None:
@@ -1072,11 +1106,11 @@ async def decode_array(
             case "ping":
                 await handle_pong_command()
             case "echo":
-                byte_ptr = await handle_echo_command(writer, byte_ptr)
+                byte_ptr = await handle_echo_command(byte_ptr)
             case "set":
-                byte_ptr = await handle_set_command(writer, byte_ptr)
+                byte_ptr = await handle_set_command(byte_ptr)
             case "get":
-                byte_ptr = await handle_get_command(writer, byte_ptr)
+                byte_ptr = await handle_get_command(byte_ptr)
             case "config":
                 byte_ptr = await handle_config_command(writer, byte_ptr)
             case "keys":
