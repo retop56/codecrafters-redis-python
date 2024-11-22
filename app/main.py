@@ -273,6 +273,34 @@ def read_rdb_file_from_disk():
         return
 
 
+async def execute_type_command(c: Command, writer: asyncio.StreamWriter) -> None:
+    if IN_MULTI_MODE:
+        multi_commands.append(c)
+        writer.write("+QUEUED\r\n".encode())
+        await writer.drain()
+        return
+    if not c.args:
+        raise ValueError("Can't process 'TYPE' command with empty args dictionary!")
+    key = c.args["key"]
+    if key not in key_store:
+        response = "+none\r\n"
+    else:
+        match key_store[key]:
+            case StringValue():
+                response = "+string\r\n"
+            case StreamValue():
+                response = "+stream\r\n"
+            case _:
+                raise TypeError(
+                    "Unable to handle type command of value associated "
+                    "with given key! "
+                    f"(Key: {key}\nValue: {repr(key_store[key])}"
+                )
+
+    writer.write(response.encode())
+    await writer.drain()
+
+
 async def execute_keys_command(c: Command, writer: asyncio.StreamWriter) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
@@ -864,23 +892,8 @@ async def handle_xadd_command(
 
 async def handle_type_command(writer: asyncio.StreamWriter, byte_ptr: int) -> int:
     key, byte_ptr = decode_bulk_string(byte_ptr)
-    if key not in key_store:
-        writer.write("+none\r\n".encode())
-        await writer.drain()
-        return byte_ptr
-    match key_store[key]:
-        case StringValue():
-            writer.write("+string\r\n".encode())
-            await writer.drain()
-        case StreamValue():
-            writer.write("+stream\r\n".encode())
-            await writer.drain()
-        case _:
-            raise TypeError(
-                "Unable to handle type command of value associated "
-                "with given key! "
-                f"(Key: {key}\nValue: {repr(key_store[key])}"
-            )
+    c = Command(cb=execute_type_command, args={"key": key})
+    commands.append(c)
     return byte_ptr
 
 
@@ -977,11 +990,6 @@ async def handle_config_command(writer: asyncio.StreamWriter, byte_ptr: int) -> 
             f"'CONFIG' needs to be followed by 'GET'.\n" f"Instead, got {get_command}"
         )
     next_command, byte_ptr = decode_bulk_string(byte_ptr)
-    # global IN_MULTI_MODE
-    # if IN_MULTI_MODE:
-    #     writer.write("+QUEUED\r\n".encode())
-    #     await writer.drain()
-    #     return byte_ptr
     match next_command:
         case "dir":
             c = Command(cb=execute_config_command, args={"param": "dir"})
