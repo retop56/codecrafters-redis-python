@@ -582,6 +582,7 @@ class Connection_Object:
             await self.writer.drain()
 
     async def execute_get_command(self, c: Command, exec_mode=False) -> None:
+        print("Executing get command")
         if self.in_multi_mode:
             self.multi_commands.append(c)
             self.writer.write("+QUEUED\r\n".encode())
@@ -590,6 +591,7 @@ class Connection_Object:
         if not c.args:
             raise ValueError("Can't process 'GET' command with empty args dictionary!")
         key = c.args["key"]
+        print(f"Key_store: {key_store}")
         if key not in key_store:
             response = "$-1\r\n"
         else:
@@ -640,7 +642,6 @@ class Connection_Object:
                 f"*3\r\n$3\r\nSET\r\n${len(key)}\r\n"
                 f"{key}\r\n${len(val)}\r\n{val}\r\n"
             )
-            # command_to_replicate = "test"
             print(f"String to be replicated: {command_to_replicate}")
             print(f"Num of connected replicas: {len(connected_replicas)}")
             print(
@@ -1157,6 +1158,7 @@ class Connection_Object:
         print("Entered 'handle_get_command' function")
         key, byte_ptr = self.decode_bulk_string(byte_ptr)
         c = Command(cb=self.execute_get_command, args={"key": key})
+        print(f"Key is '{key}'")
         commands.append(c)
         return byte_ptr
 
@@ -1401,6 +1403,8 @@ async def replica_start() -> None:
     server_socket = await asyncio.start_server(
         create_connection, "localhost", args.port
     )
+    replica_co = Connection_Object(reader=replica_reader, writer=replica_writer)
+    await replica_co.connection_handler()
     print("Right after connection handler started for replica")
     async with server_socket:
         print("Right before serve_forever")
