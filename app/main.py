@@ -40,7 +40,7 @@ empty_rdb_file_hex = bytes.fromhex(
 class Command:
     def __init__(
         self,
-        cb: Callable[["Command"], Coroutine],
+        cb: Callable[["Command", bool], Coroutine],
         writer: asyncio.StreamWriter,
         args: Optional[dict] = None,
         reader: Optional[asyncio.StreamReader] = None,
@@ -277,7 +277,36 @@ def read_rdb_file_from_disk():
         return
 
 
-async def execute_incr_command(c: Command) -> None:
+async def execute_exec_command(c: Command, exec_mode=False) -> None:
+    global IN_MULTI_MODE
+    if IN_MULTI_MODE is False:
+        c.writer.write("-ERR EXEC without MULTI\r\n".encode())
+        await c.writer.drain()
+        return
+    for c in multi_commands:
+        multi_c = multi_commands.popleft()
+        # callback_args = Command, exec_mode
+        await multi_c.cb(multi_c, True)
+
+    response = f"*{len(queued_responses)}\r\n" + "".join(r for r in queued_responses)
+
+    c.writer.write(response.encode())
+    await c.writer.drain()
+    IN_MULTI_MODE = False
+
+
+async def execute_multi_command(c: Command, exec_mode=False) -> None:
+    global IN_MULTI_MODE
+    IN_MULTI_MODE = True
+    response = "+OK\r\n"
+    if exec_mode:
+        queued_responses.append(response)
+    else:
+        c.writer.write(response.encode())
+        await c.writer.drain()
+
+
+async def execute_incr_command(c: Command, exec_mode=False) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
         c.writer.write("+QUEUED\r\n".encode())
@@ -301,11 +330,14 @@ async def execute_incr_command(c: Command) -> None:
                 f"Cannot increment value of type '{type(val_belonging_to_key).__name__}'"
             )
 
-    c.writer.write(response.encode())
-    await c.writer.drain()
+    if exec_mode:
+        queued_responses.append(response)
+    else:
+        c.writer.write(response.encode())
+        await c.writer.drain()
 
 
-async def execute_xread_command(c: Command) -> None:
+async def execute_xread_command(c: Command, exec_mode=False) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
         c.writer.write("+QUEUED\r\n".encode())
@@ -319,11 +351,14 @@ async def execute_xread_command(c: Command) -> None:
     )
     response = f"*{len(stream_keys_and_ids)}\r\n" + "".join(s for s in result_arr)
 
-    c.writer.write(response.encode())
-    await c.writer.drain()
+    if exec_mode:
+        queued_responses.append(response)
+    else:
+        c.writer.write(response.encode())
+        await c.writer.drain()
 
 
-async def execute_xrange_command(c: Command) -> None:
+async def execute_xrange_command(c: Command, exec_mode=False) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
         c.writer.write("+QUEUED\r\n".encode())
@@ -348,11 +383,14 @@ async def execute_xrange_command(c: Command) -> None:
     print(result_arr)
     response = f"*{len(result_arr)}\r\n" + "".join(r for r in result_arr)
 
-    c.writer.write(response.encode())
-    await c.writer.drain()
+    if exec_mode:
+        queued_responses.append(response)
+    else:
+        c.writer.write(response.encode())
+        await c.writer.drain()
 
 
-async def execute_xadd_command(c: Command) -> None:
+async def execute_xadd_command(c: Command, exec_mode=False) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
         c.writer.write("+QUEUED\r\n".encode())
@@ -381,11 +419,14 @@ async def execute_xadd_command(c: Command) -> None:
                     existing_entry.entry_dict[entry_id] = {k: v}
         response = f"${len(entry_id)}\r\n{entry_id}\r\n"
 
-    c.writer.write(response.encode())
-    await c.writer.drain()
+    if exec_mode:
+        queued_responses.append(response)
+    else:
+        c.writer.write(response.encode())
+        await c.writer.drain()
 
 
-async def execute_type_command(c: Command) -> None:
+async def execute_type_command(c: Command, exec_mode=False) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
         c.writer.write("+QUEUED\r\n".encode())
@@ -409,11 +450,14 @@ async def execute_type_command(c: Command) -> None:
                     f"(Key: {key}\nValue: {repr(key_store[key])}"
                 )
 
-    c.writer.write(response.encode())
-    await c.writer.drain()
+    if exec_mode:
+        queued_responses.append(response)
+    else:
+        c.writer.write(response.encode())
+        await c.writer.drain()
 
 
-async def execute_keys_command(c: Command) -> None:
+async def execute_keys_command(c: Command, exec_mode=False) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
         c.writer.write("+QUEUED\r\n".encode())
@@ -430,11 +474,14 @@ async def execute_keys_command(c: Command) -> None:
     for k in key_store:
         response += f"${len(k)}\r\n{k}\r\n"
 
-    c.writer.write(response.encode())
-    await c.writer.drain()
+    if exec_mode:
+        queued_responses.append(response)
+    else:
+        c.writer.write(response.encode())
+        await c.writer.drain()
 
 
-async def execute_config_command(c: Command) -> None:
+async def execute_config_command(c: Command, exec_mode=False) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
         c.writer.write("+QUEUED\r\n".encode())
@@ -453,11 +500,14 @@ async def execute_config_command(c: Command) -> None:
         case _:
             raise ValueError("Unable to process 'CONFIG' parameter!")
 
-    c.writer.write(response.encode())
-    await c.writer.drain()
+    if exec_mode:
+        queued_responses.append(response)
+    else:
+        c.writer.write(response.encode())
+        await c.writer.drain()
 
 
-async def execute_get_command(c: Command) -> None:
+async def execute_get_command(c: Command, exec_mode=False) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
         c.writer.write("+QUEUED\r\n".encode())
@@ -481,11 +531,14 @@ async def execute_get_command(c: Command) -> None:
             case _:
                 raise TypeError("Unable to process get command with given key")
 
-    c.writer.write(response.encode())
-    await c.writer.drain()
+    if exec_mode:
+        queued_responses.append(response)
+    else:
+        c.writer.write(response.encode())
+        await c.writer.drain()
 
 
-async def execute_set_command(c: Command) -> None:
+async def execute_set_command(c: Command, exec_mode=False) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
         c.writer.write("+QUEUED\r\n".encode())
@@ -511,7 +564,7 @@ async def execute_set_command(c: Command) -> None:
             replica_conn.write(command_to_replicate.encode())
 
 
-async def execute_echo_command(c: Command) -> None:
+async def execute_echo_command(c: Command, exec_mode=False) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
         c.writer.write("+QUEUED\r\n".encode())
@@ -522,11 +575,14 @@ async def execute_echo_command(c: Command) -> None:
     echo_msg = c.args["echo_msg"]
     response = f"${len(echo_msg)}\r\n{echo_msg}\r\n"
 
-    c.writer.write(response.encode())
-    await c.writer.drain()
+    if exec_mode:
+        queued_responses.append(response)
+    else:
+        c.writer.write(response.encode())
+        await c.writer.drain()
 
 
-async def execute_ping_command(c: Command) -> None:
+async def execute_ping_command(c: Command, exec_mode=False) -> None:
     if IN_MULTI_MODE:
         multi_commands.append(c)
         c.writer.write("+QUEUED\r\n".encode())
@@ -534,8 +590,11 @@ async def execute_ping_command(c: Command) -> None:
         return
     response = "+PONG\r\n"
 
-    c.writer.write(response.encode())
-    await c.writer.drain()
+    if exec_mode:
+        queued_responses.append(response)
+    else:
+        c.writer.write(response.encode())
+        await c.writer.drain()
 
 
 def clear_bad_command(byte_ptr: int) -> int:
@@ -556,14 +615,16 @@ def update_offset(byte_ptr: int) -> None:
 
 
 async def handle_exec_command(writer: asyncio.StreamWriter) -> None:
-    global IN_MULTI_MODE
-    if IN_MULTI_MODE is False:
-        writer.write("-ERR EXEC without MULTI\r\n".encode())
-        await writer.drain()
-        return
-    IN_MULTI_MODE = False
-    writer.write("*0\r\n".encode())
-    await writer.drain()
+    # global IN_MULTI_MODE
+    # if IN_MULTI_MODE is False:
+    #     writer.write("-ERR EXEC without MULTI\r\n".encode())
+    #     await writer.drain()
+    #     return
+    # IN_MULTI_MODE = False
+    # writer.write("*0\r\n".encode())
+    # await writer.drain()
+    c = Command(cb=execute_exec_command, writer=writer)
+    commands.append(c)
 
 
 async def handle_multi_command(
@@ -1248,8 +1309,7 @@ async def decode_array(
             case "multi":
                 byte_ptr = await handle_multi_command(reader, writer, byte_ptr)
             case "exec":
-                writer.write("-ERR EXEC without MULTI\r\n".encode())
-                await writer.drain()
+                await handle_exec_command(writer)
             case _:
                 raise ValueError(f"Unrecognized command: {s}")
         for _ in range(byte_ptr):
@@ -1258,8 +1318,12 @@ async def decode_array(
             b_stream.popleft()
         update_offset(byte_ptr)
         byte_ptr = 0
-        c = commands.pop()
-        await c.cb(c)
+        try:
+            c = commands.pop()
+        except IndexError:
+            raise SystemExit(f"Command just processed: {s}")
+        # callback_args = Command, exec_mode
+        await c.cb(c, False)
 
 
 async def connection_handler(
