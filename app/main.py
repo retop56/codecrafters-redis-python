@@ -33,6 +33,7 @@ empty_rdb_file_hex = bytes.fromhex(
     "41000fa08616f662d62617365c000fff06e3bfec0ff"
     "5aa2"
 )
+waiting_responses = []
 
 
 class Command:
@@ -284,7 +285,7 @@ class Connection_Object:
         self.multi_commands: deque["Command"] = deque()
         self.queued_responses: list[str] = []
         self.waiting = False
-        self.waiting_responses = []
+        self.previous_write = False
 
     async def execute_discard_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode is False:
@@ -486,33 +487,33 @@ class Connection_Object:
         self.update_offset(c.bytes_processed)
 
     async def execute_wait_command(self, c: Command, exec_mode=False) -> None:
+        global waiting_responses
         print("Executing wait command")
         if not c.args:
             raise ValueError(
                 "Can't processed 'WAIT' command with empty args dictionary!"
             )
-        timeout, num_replicas = c.args["timeout"], c.args["num_replicas"]
+        timeout = c.args["timeout"]
         self.waiting = True
         response = f":{len(connected_replicas)}\r\n"
-        # current_offset = master_repl_offset
-        # if connected_replicas and current_offset > 0:
-        #     print("First block")
-        #     print(
-        #         f"Current connected replicas: {'\n'.join(str(c) for c in connected_replicas)}"
-        #     )
-        #     print(f"Current offset: {current_offset}")
-        #     for v in connected_replicas.values():
-        #         v.write("*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n".encode())
-        #     await asyncio.sleep(int(timeout) / 1000)
-        #     print(f"Waiting_responses: {self.waiting_responses}")
-        #     self.writer.write(f":{len(self.waiting_responses)}\r\n".encode())
-        #     await self.writer.drain()
-        # else:
-        #     print(
-        #         f"Current connected replicas: {'\n'.join(str(c) for c in connected_replicas)}"
-        #     )
-        self.writer.write(response.encode())
-        await self.writer.drain()
+        current_offset = master_repl_offset
+        if self.previous_write:
+            print("First block")
+            print(
+                f"Current connected replicas: \n{'\n'.join(str(c) for c in connected_replicas)}"
+            )
+            print(f"Current offset: {current_offset}")
+            for v in connected_replicas.values():
+                v.write("*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n".encode())
+            await asyncio.sleep(int(timeout) / 1000)
+            print(f"Waiting_responses: {waiting_responses}")
+            self.writer.write(f":{len(waiting_responses)}\r\n".encode())
+            await self.writer.drain()
+            self.waiting = False
+            waiting_responses.clear()
+        else:
+            self.writer.write(response.encode())
+            await self.writer.drain()
         self.update_offset(c.bytes_processed)
 
     async def execute_psync_command(self, c: Command, exec_mode=False) -> None:
@@ -531,21 +532,26 @@ class Connection_Object:
                 "Can't process 'REPLCONF' command with empty args dictionary!"
             )
         arg = c.args["arg"]
+        response = None
         if arg == "GETACK" and IS_MASTER is False:
             response = (
                 f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(str(replica_offset))}"
                 f"\r\n{replica_offset}\r\n"
             )
             # response = "*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n"
+        elif arg == "ACK":
+            print("ACK and waiting")
+            offset_amount = c.args["offset_amount"]
+            print(f"Offset amount adding to waiting_responses: {offset_amount}")
+            global waiting_responses
+            waiting_responses.append(offset_amount)
         else:
             response = "+OK\r\n"
 
-        self.writer.write(response.encode())
-        await self.writer.drain()
+        if response:
+            self.writer.write(response.encode())
+            await self.writer.drain()
         if IS_MASTER:
-            offset_amount = c.args["offset_amount"]
-            if self.waiting and offset_amount:
-                self.waiting_responses.append(offset_amount)
             global connected_replicas
             replica_conn_info = self.writer.get_extra_info("peername")
             print(f"Adding {replica_conn_info} to connected_replicas dict")
@@ -778,6 +784,7 @@ class Connection_Object:
             },
         )
         commands.append(c)
+        self.previous_write = True
         return byte_ptr
 
     async def xread_w_blocking(self, byte_ptr: int) -> int:
@@ -1137,6 +1144,7 @@ class Connection_Object:
         args["temp_dict"] = temp_dict
         c = Command(cb=self.execute_xadd_command, bytes_processed=byte_ptr, args=args)
         commands.append(c)
+        self.previous_write = True
         return byte_ptr
 
     async def handle_type_command(self, byte_ptr: int) -> int:
@@ -1177,7 +1185,9 @@ class Connection_Object:
         return byte_ptr
 
     async def handle_replconf_command(self, byte_ptr: int) -> int:
+        print("Inside handle_replconf_command")
         s, byte_ptr = self.decode_bulk_string(byte_ptr)
+        print(f"REPLCONF arg = {s}")
         print(f"matching s in replconf function: {s}")
         offset_amount = None
         match s:
@@ -1281,6 +1291,7 @@ class Connection_Object:
             args={"key": key, "val": val, "expiry": expiry_time},
         )
         commands.append(c)
+        self.previous_write = True
         return byte_ptr
 
     async def handle_echo_command(self, byte_ptr: int) -> int:
