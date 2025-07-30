@@ -762,7 +762,9 @@ class Connection_Object:
             master_repl_offset += byte_ptr
 
     async def handle_rpush_command(self, byte_ptr: int) -> int:
-        print("Handling 'RPUSH' Command")
+        key, byte_ptr = self.decode_bulk_string(byte_ptr)
+        value, byte_ptr = self.decode_bulk_string(byte_ptr)
+        print(f"Found key: {key}\nFound value: {value}")
         return byte_ptr
 
     async def handle_discard_command(self, byte_ptr: int) -> None:
