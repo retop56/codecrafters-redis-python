@@ -287,6 +287,9 @@ class Connection_Object:
         self.waiting = False
         self.previous_write = False
 
+    async def execute_rpush_command(self, c: Command, exec_mode=False) -> None:
+        return
+
     async def execute_discard_command(self, c: Command, exec_mode=False) -> None:
         if self.in_multi_mode is False:
             self.writer.write("-ERR DISCARD without MULTI\r\n".encode())
@@ -765,6 +768,8 @@ class Connection_Object:
         key, byte_ptr = self.decode_bulk_string(byte_ptr)
         value, byte_ptr = self.decode_bulk_string(byte_ptr)
         print(f"Found key: {key}\nFound value: {value}")
+        c = Command(cb=self.execute_rpush_command, bytes_processed=byte_ptr)
+        commands.append(c)
         return byte_ptr
 
     async def handle_discard_command(self, byte_ptr: int) -> None:
