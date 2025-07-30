@@ -400,21 +400,24 @@ class Connection_Object:
             c.args["stream_key"],
         )
         if start_id == "-":
+            print("without explicit start")
             result_arr = self.xrange_retrieve_entries_without_explicit_start(
                 end_id, stream_key
             )
         elif end_id == "+":
+            print("without explicit end")
             result_arr = self.xrange_retrieve_entries_without_explicit_end(
                 start_id, stream_key
             )
         else:
+            print("with explicit start and stop")
             result_arr = self.xrange_retrieve_entries_with_explicit_start_and_stop(
                 start_id, end_id, stream_key
             )
         print("XRANGE result array (so far):")
         print(result_arr)
         response = f"*{len(result_arr)}\r\n" + "".join(r for r in result_arr)
-
+        print(f"Response: {response}")
         if exec_mode:
             self.queued_responses.append(response)
         elif IS_MASTER:
@@ -998,7 +1001,7 @@ class Connection_Object:
 
     def encode_entry_to_array(self, entry_id: str, val_dict: dict) -> str:
         result_str = f"*2\r\n${len(entry_id)}\r\n{entry_id}\r\n"
-        result_str += f"*{len(val_dict)}\r\n"
+        result_str += f"*{len(val_dict) * 2}\r\n"
         for k, v in val_dict.items():
             result_str += f"${len(k)}\r\n{k}\r\n"
             result_str += f"${len(v)}\r\n{v}\r\n"
