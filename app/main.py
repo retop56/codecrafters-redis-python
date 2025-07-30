@@ -761,6 +761,10 @@ class Connection_Object:
             global master_repl_offset
             master_repl_offset += byte_ptr
 
+    async def handle_rpush_command(self, byte_ptr: int) -> int:
+        print("Handling 'RPUSH' Command")
+        return byte_ptr
+
     async def handle_discard_command(self, byte_ptr: int) -> None:
         c = Command(cb=self.execute_discard_command, bytes_processed=byte_ptr)
         commands.append(c)
@@ -1408,6 +1412,8 @@ class Connection_Object:
                     await self.handle_exec_command(byte_ptr)
                 case "discard":
                     await self.handle_discard_command(byte_ptr)
+                case "rpush":
+                    byte_ptr = await self.handle_rpush_command(byte_ptr)
                 case _:
                     raise ValueError(f"Unrecognized command: {s}")
             for _ in range(byte_ptr):
