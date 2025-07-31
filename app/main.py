@@ -835,7 +835,7 @@ class Connection_Object:
             b_stream.clear()
             # Check if stream_key even exists in key_store. If it doesn't, wait until
             # entry is created under stream name. If it does, wait until another entry
-            # is entry is added under stream name.
+            # is added under stream name.
             for i, v in enumerate(stream_keys_and_ids):
                 stream_key, id = v
                 if stream_key in key_store:
@@ -891,9 +891,10 @@ class Connection_Object:
             return final_result
         else:
             if prev_len is None:
-                raise ValueError(
-                    "If start_id is '$', previous length of key should be provided!"
-                )
+                # raise ValueError(
+                #     "If start_id is '$', previous length of key should be provided!"
+                # )
+                prev_len = 0
             entries_for_stream_key = list(
                 cast(StreamValue, key_store[stream_key]).entry_dict.items()
             )
