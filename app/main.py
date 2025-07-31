@@ -140,7 +140,7 @@ def rdb_file_process_ht_entry(f: BinaryIO) -> BinaryIO:
             key_store[key] = StringValue(val=val, expiry=None)
         # Indicates that this key has an expire, and that the expire
         # timestamp is expressed in milliseconds
-        case b"\xFC":
+        case b"\xfc":
             # The expire timestamp, expressed in Unix time,
             # stored as an 8-byte unsigned long, in little-endian (read right-to-left)
             expiry, f = rdb_file_process_expiry(f, 8)
@@ -152,7 +152,7 @@ def rdb_file_process_ht_entry(f: BinaryIO) -> BinaryIO:
             key_store[key] = StringValue(val=val, expiry=expiry)
         # Indicates that this key ("baz") has an expire,
         # and that the expire timestamp is expressed in seconds. */
-        case b"\xFD":
+        case b"\xfd":
             expiry, f = rdb_file_process_expiry(f, 4)
             if f.read(1) != b"\x00":
                 f.seek(-1, 1)
@@ -169,9 +169,9 @@ def rdb_file_process_ht_entry(f: BinaryIO) -> BinaryIO:
 def rdb_file_process_database_section(f: BinaryIO) -> BinaryIO:
     # Get index of database (no current known use)
     _, f = rdb_file_process_size_encoded_value(f)
-    if f.read(1) != b"\xFB":
+    if f.read(1) != b"\xfb":
         f.seek(-1, 1)
-        raise ValueError(f'Expected b"\xFB", instead got {f.read(1)}')
+        raise ValueError(f'Expected b"\xfb", instead got {f.read(1)}')
     ht_total_keys, f = rdb_file_process_size_encoded_value(f)
     ht_expiry_keys, f = rdb_file_process_size_encoded_value(f)
     print(f"Total keys: {ht_total_keys}")
@@ -222,15 +222,15 @@ def rdb_file_process_string_encoded_value(f: BinaryIO) -> tuple[str, BinaryIO]:
     first_byte = f.read(1)
     if (int.from_bytes(first_byte) & 0b11000000) == 0b11000000:
         match first_byte:
-            case b"\xC0":
+            case b"\xc0":
                 s = str(int.from_bytes(f.read(1)))
                 print(f'Found integer string: "{s}"')
                 return (s, f)
-            case b"\xC1":
+            case b"\xc1":
                 s = str(int.from_bytes(f.read(2), byteorder="little"))
                 print(f'Found integer string: "{s}"')
                 return (s, f)
-            case b"\xC2":
+            case b"\xc2":
                 s = str(int.from_bytes(f.read(4), byteorder="little"))
                 print(f'Found integer string: "{s}"')
                 return (s, f)
@@ -264,9 +264,9 @@ def read_rdb_file_from_disk():
             while True:
                 curr_chunk = f.read(1)
                 match curr_chunk:
-                    case b"\xFA":
+                    case b"\xfa":
                         f = rdb_file_process_metadata_section(f)
-                    case b"\xFE":
+                    case b"\xfe":
                         f = rdb_file_process_database_section(f)
                     case _:
                         break
@@ -375,7 +375,14 @@ class Connection_Object:
             c.args["result_arr"],
             c.args["stream_keys_and_ids"],
         )
-        response = f"*{len(stream_keys_and_ids)}\r\n" + "".join(s for s in result_arr)
+        print(f"result_arr: {result_arr}")
+        print(f"stream_keys_and_ids: {stream_keys_and_ids}")
+        if result_arr[0] == "$-1\r\n":
+            response = "$-1\r\n"
+        else:
+            response = f"*{len(stream_keys_and_ids)}\r\n" + "".join(
+                s for s in result_arr
+            )
 
         if exec_mode:
             self.queued_responses.append(response)
