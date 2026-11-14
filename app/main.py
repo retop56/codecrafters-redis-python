@@ -6,8 +6,9 @@ from typing import Optional, BinaryIO, cast
 import argparse
 import random
 import string
-import re
-import copy
+
+# import re
+# import copy
 
 parser = argparse.ArgumentParser(
     prog="Bootleg Redis",
@@ -76,11 +77,11 @@ class StreamValue(HashValue):
     Structure of entry in key_store with StreamValue value
     ```
     key_store {
-        stream_key: StreamValue {
-                                entry_id: {
-                                    entry_key_1: entry_val_1,
-                                    entry_key_2: entry_val_2,
-                                    etc.
+      stream_key: StreamValue(entry_dict) {
+                                    entry_id: {
+                                        entry_key_1: entry_val_1,
+                                        entry_key_2: entry_val_2,
+                                        etc.
                     }
             }
     }
@@ -371,18 +372,29 @@ class Connection_Object:
             raise ValueError(
                 "Can't process 'XRANGE' command with empty args dictionary!"
             )
-        result_arr, stream_keys_and_ids = (
-            c.args["result_arr"],
-            c.args["stream_keys_and_ids"],
-        )
-        print(f"result_arr: {result_arr}")
-        print(f"stream_keys_and_ids: {stream_keys_and_ids}")
-        if result_arr[0] == "$-1\r\n":
+        # result_arr, stream_keys_and_ids = (
+        #     c.args["result_arr"],
+        #     c.args["stream_keys_and_ids"],
+        # )
+        # print(f"result_arr: {result_arr}")
+        # print(f"stream_keys_and_ids: {stream_keys_and_ids}")
+        # if result_arr[0] == "$-1\r\n":
+        #     response = "$-1\r\n"
+        # else:
+        #     response = f"*{len(stream_keys_and_ids)}\r\n" + "".join(
+        #         s for s in result_arr
+        #     )
+        if len(c.args["fv_pairs"]) == 0:
             response = "$-1\r\n"
         else:
-            response = f"*{len(stream_keys_and_ids)}\r\n" + "".join(
-                s for s in result_arr
+            response = (
+                f"*1\r\n*2\r\n${len(c.args["key"])}\r\n{c.args["key"]}"
+                f"*1\r\n*2\r\n${len(c.args["entry_id"])}\r\n{c.args["entry_id"]}"
             )
+            response += f"*{len(c.args["fv_pairs"]) * 2}\r\n"
+            for field, value in c.args["fv_pairs"]:
+                response += f"${len(field)}\r\n{field}\r\n"
+                response += f"${len(value)}\r\n{value}\r\n"
 
         if exec_mode:
             self.queued_responses.append(response)
@@ -808,136 +820,172 @@ class Connection_Object:
         self.previous_write = True
         return byte_ptr
 
-    async def xread_w_blocking(self, byte_ptr: int) -> int:
-        regex_for_entry_id = re.compile(r"\d+-\d+")
-        block_time_ms, byte_ptr = self.decode_bulk_string(byte_ptr)
-        s, byte_ptr = self.decode_bulk_string(byte_ptr)
-        if s != "streams":
-            raise ValueError(
-                f"block time should be followed by 'streams'. Instead, it's followed by {s}"
-            )
-        stream_keys_and_ids = []
-        while True:
-            possible_stream_key, byte_ptr = self.decode_bulk_string(byte_ptr)
-            if (
-                regex_for_entry_id.fullmatch(possible_stream_key)
-                or possible_stream_key == "$"
-            ):
-                stream_keys_and_ids[0] = (*stream_keys_and_ids[0], possible_stream_key)
-                break
-            else:
-                stream_keys_and_ids.append((possible_stream_key,))
-        for i in range(1, len(stream_keys_and_ids)):
-            entry_id, byte_ptr = self.decode_bulk_string(byte_ptr)
-            stream_keys_and_ids[i] = (*stream_keys_and_ids[i], entry_id)
-        if block_time_ms == "0":
-            blocked_command_queue = copy.deepcopy(b_stream)
-            b_stream.clear()
-            # Check if stream_key even exists in key_store. If it doesn't, wait until
-            # entry is created under stream name. If it does, wait until another entry
-            # is entry is added under stream name.
-            for i, v in enumerate(stream_keys_and_ids):
-                stream_key, id = v
-                if stream_key in key_store:
-                    curr_stream_val = cast(StreamValue, key_store[stream_key])
-                    curr_len = len(curr_stream_val.entry_dict)
-                    while True:
-                        if len(curr_stream_val.entry_dict) > curr_len:
-                            break
-                        else:
-                            await asyncio.sleep(0)
-                    if id == "$":
-                        stream_keys_and_ids[i] = (stream_key, id, curr_len)
-                else:
-                    while stream_key not in key_store:
-                        await asyncio.sleep(0)
-                    if id == "$":
-                        stream_keys_and_ids[i] = (stream_key, id, 0)
-            b_stream.extend(blocked_command_queue)
-        else:
-            blocked_command_queue = copy.deepcopy(b_stream)
-            b_stream.clear()
-            print(f"Blocking for {block_time_ms} ms")
-            await asyncio.sleep(int(block_time_ms) / 1000)
-            b_stream.extend(blocked_command_queue)
-        result_arr = []
-        for e in stream_keys_and_ids:
-            result_arr.append(self.xread_retrieve_entries(*e))
-        c = Command(
-            cb=self.execute_xread_command,
-            bytes_processed=byte_ptr,
-            args={"stream_keys_and_ids": stream_keys_and_ids, "result_arr": result_arr},
-        )
-        commands.append(c)
-        return byte_ptr
+    # async def xread_w_blocking(self, byte_ptr: int) -> int:
+    #     regex_for_entry_id = re.compile(r"\d+-\d+")
+    #     block_time_ms, byte_ptr = self.decode_bulk_string(byte_ptr)
+    #     s, byte_ptr = self.decode_bulk_string(byte_ptr)
+    #     if s != "streams":
+    #         raise ValueError(
+    #             f"block time should be followed by 'streams'. Instead, it's followed by {s}"
+    #         )
+    #     stream_keys_and_ids = []
+    #     while True:
+    #         possible_stream_key, byte_ptr = self.decode_bulk_string(byte_ptr)
+    #         if (
+    #             regex_for_entry_id.fullmatch(possible_stream_key)
+    #             or possible_stream_key == "$"
+    #         ):
+    #             stream_keys_and_ids[0] = (*stream_keys_and_ids[0], possible_stream_key)
+    #             break
+    #         else:
+    #             stream_keys_and_ids.append((possible_stream_key,))
+    #     for i in range(1, len(stream_keys_and_ids)):
+    #         entry_id, byte_ptr = self.decode_bulk_string(byte_ptr)
+    #         stream_keys_and_ids[i] = (*stream_keys_and_ids[i], entry_id)
+    #     if block_time_ms == "0":
+    #         blocked_command_queue = copy.deepcopy(b_stream)
+    #         b_stream.clear()
+    #         # Check if stream_key even exists in key_store. If it doesn't, wait until
+    #         # entry is created under stream name. If it does, wait until another entry
+    #         # is added under stream name.
+    #         for i, v in enumerate(stream_keys_and_ids):
+    #             stream_key, id = v
+    #             if stream_key in key_store:
+    #                 curr_stream_val = cast(StreamValue, key_store[stream_key])
+    #                 curr_len = len(curr_stream_val.entry_dict)
+    #                 while True:
+    #                     if len(curr_stream_val.entry_dict) > curr_len:
+    #                         break
+    #                     else:
+    #                         await asyncio.sleep(0)
+    #                 if id == "$":
+    #                     stream_keys_and_ids[i] = (stream_key, id, curr_len)
+    #             else:
+    #                 while stream_key not in key_store:
+    #                     await asyncio.sleep(0)
+    #                 if id == "$":
+    #                     stream_keys_and_ids[i] = (stream_key, id, 0)
+    #         b_stream.extend(blocked_command_queue)
+    #     else:
+    #         blocked_command_queue = copy.deepcopy(b_stream)
+    #         b_stream.clear()
+    #         print(f"Blocking for {block_time_ms} ms")
+    #         await asyncio.sleep(int(block_time_ms) / 1000)
+    #         b_stream.extend(blocked_command_queue)
+    #     result_arr = []
+    #     for e in stream_keys_and_ids:
+    #         result_arr.append(self.xread_retrieve_entries(*e))
+    #     c = Command(
+    #         cb=self.execute_xread_command,
+    #         bytes_processed=byte_ptr,
+    #         args={"stream_keys_and_ids": stream_keys_and_ids, "result_arr": result_arr},
+    #     )
+    #     commands.append(c)
+    #     return byte_ptr
 
-    def xread_retrieve_entries(
-        self, stream_key: str, start_id: str, prev_len: Optional[int] = None
-    ) -> str:
-        if start_id != "$":
-            gt_time, gt_seqNum = start_id.split("-")
-            entries_for_stream_key = cast(StreamValue, key_store[stream_key]).entry_dict
-            result_arr = []
-            for k, v in entries_for_stream_key.items():
-                curr_time, curr_seqNum = k.split("-")
-                if curr_time >= gt_time and curr_seqNum > gt_seqNum:
-                    result_arr.append(self.encode_entry_to_array(k, v))
-            if not result_arr:
-                return "$-1\r\n"
-            final_result = (
-                f"*2\r\n${len(stream_key)}\r\n{stream_key}\r\n*{len(result_arr)}\r\n"
-                + "".join(s for s in result_arr)
-            )
-            return final_result
-        else:
-            if prev_len is None:
-                raise ValueError(
-                    "If start_id is '$', previous length of key should be provided!"
-                )
-            entries_for_stream_key = list(
-                cast(StreamValue, key_store[stream_key]).entry_dict.items()
-            )
-            result_arr = []
-            for i in range(prev_len, len(entries_for_stream_key)):
-                k, v = entries_for_stream_key[i]
-                result_arr.append(self.encode_entry_to_array(k, v))
-            if not result_arr:
-                return "$-1\r\n"
-            final_result = (
-                f"*2\r\n${len(stream_key)}\r\n{stream_key}\r\n*{len(result_arr)}\r\n"
-                + "".join(s for s in result_arr)
-            )
-            return final_result
+    # def xread_retrieve_entries(
+    #     self, stream_key: str, start_id: str, prev_len: Optional[int] = None
+    # ) -> str:
+    #     if start_id != "$":
+    #         gt_time, gt_seqNum = start_id.split("-")
+    #         entries_for_stream_key = cast(StreamValue, key_store[stream_key]).entry_dict
+    #         result_arr = []
+    #         for k, v in entries_for_stream_key.items():
+    #             curr_time, curr_seqNum = k.split("-")
+    #             if curr_time >= gt_time and curr_seqNum > gt_seqNum:
+    #                 result_arr.append(self.encode_entry_to_array(k, v))
+    #         if not result_arr:
+    #             return "$-1\r\n"
+    #         final_result = (
+    #             f"*2\r\n${len(stream_key)}\r\n{stream_key}\r\n*{len(result_arr)}\r\n"
+    #             + "".join(s for s in result_arr)
+    #         )
+    #         return final_result
+    #     else:
+    #         if prev_len is None:
+    #             # raise ValueError(
+    #             #     "If start_id is '$', previous length of key should be provided!"
+    #             # )
+    #             prev_len = 0
+    #         entries_for_stream_key = list(
+    #             cast(StreamValue, key_store[stream_key]).entry_dict.items()
+    #         )
+    #         result_arr = []
+    #         for i in range(prev_len, len(entries_for_stream_key)):
+    #             k, v = entries_for_stream_key[i]
+    #             result_arr.append(self.encode_entry_to_array(k, v))
+    #         if not result_arr:
+    #             return "$-1\r\n"
+    #         final_result = (
+    #             f"*2\r\n${len(stream_key)}\r\n{stream_key}\r\n*{len(result_arr)}\r\n"
+    #             + "".join(s for s in result_arr)
+    #         )
+    #         return final_result
+
+    # async def handle_xread_command(self, byte_ptr: int) -> int:
+    #     # regex_for_entry_id = re.compile(r"\d+-\d+")
+    #     s, byte_ptr = self.decode_bulk_string(byte_ptr)
+    #     # if s == "block":
+    #     #     return await self.xread_w_blocking(byte_ptr)
+    #     if s != "streams":
+    #         raise ValueError(
+    #             f"'XREAD' should be followed by 'streams'. Instead, it's followed by {s}"
+    #         )
+    #     key, byte_ptr = self.decode_bulk_string(byte_ptr)
+    #     entry_id, byte_ptr = self.decode_bulk_string(byte_ptr)
+    #     # stream_keys_and_ids = []
+    #     # while True:
+    #     #     possible_stream_key, byte_ptr = self.decode_bulk_string(byte_ptr)
+    #     #     if regex_for_entry_id.fullmatch(possible_stream_key):
+    #     #         stream_keys_and_ids[0] = (*stream_keys_and_ids[0], possible_stream_key)
+    #     #         break
+    #     #     else:
+    #     #         stream_keys_and_ids.append((possible_stream_key,))
+    #     # for i in range(1, len(stream_keys_and_ids)):
+    #     #     entry_id, byte_ptr = self.decode_bulk_string(byte_ptr)
+    #     #     stream_keys_and_ids[i] = (*stream_keys_and_ids[i], entry_id)
+    #     # result_arr = []
+    #     # for e in stream_keys_and_ids:
+    #     #     result_arr.append(self.xread_retrieve_entries(*e))
+    #     c = Command(
+    #         cb=self.execute_xread_command,
+    #         bytes_processed=byte_ptr,
+    #         # args={"stream_keys_and_ids": stream_keys_and_ids, "result_arr": result_arr},
+    #     )
+    #     commands.append(c)
+    #     return byte_ptr
 
     async def handle_xread_command(self, byte_ptr: int) -> int:
-        regex_for_entry_id = re.compile(r"\d+-\d+")
         s, byte_ptr = self.decode_bulk_string(byte_ptr)
-        if s == "block":
-            return await self.xread_w_blocking(byte_ptr)
         if s != "streams":
             raise ValueError(
-                f"'XREAD' should be followed by 'streams'. Instead, it's followed by {s}"
+                f"'XREAD' should be followed by 'streams'. Instead, it's followed by '{s}'."
             )
-        stream_keys_and_ids = []
-        while True:
-            possible_stream_key, byte_ptr = self.decode_bulk_string(byte_ptr)
-            if regex_for_entry_id.fullmatch(possible_stream_key):
-                stream_keys_and_ids[0] = (*stream_keys_and_ids[0], possible_stream_key)
-                break
-            else:
-                stream_keys_and_ids.append((possible_stream_key,))
-        for i in range(1, len(stream_keys_and_ids)):
-            entry_id, byte_ptr = self.decode_bulk_string(byte_ptr)
-            stream_keys_and_ids[i] = (*stream_keys_and_ids[i], entry_id)
-        result_arr = []
-        for e in stream_keys_and_ids:
-            result_arr.append(self.xread_retrieve_entries(*e))
-        c = Command(
-            cb=self.execute_xread_command,
-            bytes_processed=byte_ptr,
-            args={"stream_keys_and_ids": stream_keys_and_ids, "result_arr": result_arr},
+        key, byte_ptr = self.decode_bulk_string(byte_ptr)
+        entry_id, byte_ptr = self.decode_bulk_string(byte_ptr)
+
+        fv_pairs = []
+        if key in key_store:
+            # Find all entries that are greater than or equal to entry_id
+            sv = key_store[key]
+            if not isinstance(sv, StreamValue):
+                raise TypeError(
+                    "Trying to use 'XREAD' to read an object that "
+                    "is not of type 'StreamValue'"
+                )
+            for e in reversed(sv.entry_dict.keys()):
+                if e < entry_id:
+                    break
+                fv_pairs.append(sv.entry_dict[e])
+
+        commands.append(
+            Command(
+                cb=self.execute_xread_command,
+                bytes_processed=byte_ptr,
+                args={"key": key, "entry_id": entry_id, "fv_pairs": fv_pairs},
+            )
         )
-        commands.append(c)
+
         return byte_ptr
 
     def xrange_retrieve_entries_without_explicit_end(
