@@ -384,17 +384,32 @@ class Connection_Object:
         #     response = f"*{len(stream_keys_and_ids)}\r\n" + "".join(
         #         s for s in result_arr
         #     )
-        if len(c.args["fv_pairs"]) == 0:
+        if len(c.args["entry_id_w_kv_pairs"]) == 0:
             response = "$-1\r\n"
         else:
-            response = (
-                f"*1\r\n*2\r\n${len(c.args["key"])}\r\n{c.args["key"]}"
-                f"*1\r\n*2\r\n${len(c.args["entry_id"])}\r\n{c.args["entry_id"]}"
-            )
-            response += f"*{len(c.args["fv_pairs"]) * 2}\r\n"
-            for field, value in c.args["fv_pairs"]:
-                response += f"${len(field)}\r\n{field}\r\n"
-                response += f"${len(value)}\r\n{value}\r\n"
+            # response = (
+            #     f"*1\r\n*2\r\n${len(c.args["key"])}\r\n{c.args["key"]}\r\n"
+            #     f"*1\r\n*2\r\n${len(c.args["entry_id"])}\r\n{c.args["entry_id"]}\r\n"
+            # )
+            # Return value is array of streams, where each stream contains:
+            #   The stream key as a bulk string (here)
+            response = f"*1\r\n*2\r\n${len(c.args["key"])}\r\n{c.args["key"]}\r\n"
+            #   An array of entries where each entry is an array of two parts:
+            response += f"*1\r\n*{len(c.args["entry_id_w_kv_pairs"]) * 2}\r\n"
+            for entry_id, kv_pairs_dict in c.args["entry_id_w_kv_pairs"]:
+                response += f"${len(entry_id)}\r\n{entry_id}\r\n"
+                response += f"*{len(kv_pairs_dict) * 2}\r\n"
+                for key, value in kv_pairs_dict.items():
+                    response += f"${len(key)}\r\n{key}\r\n"
+                    response += f"${len(value)}\r\n{value}\r\n"
+            # response += f"*{len(c.args["fv_pairs"]) * 2}\r\n"
+            # for field, value in c.args["fv_pairs"]:
+            #     response += f"${len(field)}\r\n{field}\r\n"
+            #     response += f"${len(value)}\r\n{value}\r\n"
+            # for i in c.args["fv_pairs"]:
+            #     for field, value in i.items():
+            #         response += f"${len(field)}\r\n{field}\r\n"
+            #         response += f"${len(value)}\r\n{value}\r\n"
 
         if exec_mode:
             self.queued_responses.append(response)
@@ -962,9 +977,9 @@ class Connection_Object:
                 f"'XREAD' should be followed by 'streams'. Instead, it's followed by '{s}'."
             )
         key, byte_ptr = self.decode_bulk_string(byte_ptr)
-        entry_id, byte_ptr = self.decode_bulk_string(byte_ptr)
+        min_entry_id, byte_ptr = self.decode_bulk_string(byte_ptr)
 
-        fv_pairs = []
+        entry_id_w_kv_pairs = []
         if key in key_store:
             # Find all entries that are greater than or equal to entry_id
             sv = key_store[key]
@@ -973,16 +988,22 @@ class Connection_Object:
                     "Trying to use 'XREAD' to read an object that "
                     "is not of type 'StreamValue'"
                 )
-            for e in reversed(sv.entry_dict.keys()):
-                if e < entry_id:
+            for actual_entry_id in reversed(sv.entry_dict.keys()):
+                if actual_entry_id < min_entry_id:
                     break
-                fv_pairs.append(sv.entry_dict[e])
+                entry_id_w_kv_pairs.append(
+                    (actual_entry_id, sv.entry_dict[actual_entry_id])
+                )
 
         commands.append(
             Command(
                 cb=self.execute_xread_command,
                 bytes_processed=byte_ptr,
-                args={"key": key, "entry_id": entry_id, "fv_pairs": fv_pairs},
+                args={
+                    "key": key,
+                    "min_entry_id": min_entry_id,
+                    "entry_id_w_kv_pairs": entry_id_w_kv_pairs,
+                },
             )
         )
 
